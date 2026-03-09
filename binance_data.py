@@ -63,7 +63,7 @@ async def listen_trades(ws_url, is_spot=False):
                         
                     # Mantenemos las alertas de super ballenas en futuros
                     if not is_spot and volume_usd >= 1000000:
-                        trade_dir = "VENTArojo" if is_buyer_maker else "COMPRAverde"
+                        trade_dir = "VENTA 🔴" if is_buyer_maker else "COMPRA 🟢"
                         asyncio.create_task(send_telegram_message(
                             f"🐋 <b>SUPER BALLENA FUTUROS</b>\n{trade_dir} de ${volume_usd:,.0f} a ${price:,.2f}"
                         ))
