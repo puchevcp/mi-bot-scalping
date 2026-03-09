@@ -24,11 +24,16 @@ class MarketContext:
         self.oi_5m_ago = 0.0
         self.oi_history = [] # Para guardar el historico de los ultimos 5 min
         
-        # Order Book BBO (Best Bid / Best Offer)
-        self.best_bid_price = 0.0
-        self.best_bid_qty = 0.0
-        self.best_ask_price = 0.0
-        self.best_ask_qty = 0.0
+        # Heatmap / Depth (Top 20 Levels)
+        self.depth_bids_usd = 0.0
+        self.depth_asks_usd = 0.0
+        
+        # Liquidations (Rekt Stream)
+        self.recent_liquidations = [] # [(timestamp, 'LONG'/'SHORT', usd_value)]
+        
+        # Volume Profile (POC)
+        self.volume_profile = {} # {rounded_price: volume_usd}
+        self.session_poc_price = 0.0
 
 ctx = MarketContext()
 
@@ -61,6 +66,14 @@ async def listen_trades(ws_url, is_spot=False):
                         if is_spot: ctx.spot_cvd += volume_usd
                         else: ctx.futures_cvd += volume_usd
                         
+                    # Volume Profile (Solo usamos futuros para el POC)
+                    if not is_spot:
+                        rounded_price = round(price / 50) * 50 # Agrupamos perfil de volumen cada $50
+                        ctx.volume_profile[rounded_price] = ctx.volume_profile.get(rounded_price, 0) + volume_usd
+                        # Actualizar POC (Point of Control)
+                        if ctx.volume_profile:
+                            ctx.session_poc_price = max(ctx.volume_profile, key=ctx.volume_profile.get)
+                        
                     # Mantenemos las alertas de super ballenas en futuros
                     if not is_spot and volume_usd >= 1000000:
                         trade_dir = "VENTA 🔴" if is_buyer_maker else "COMPRA 🟢"
@@ -72,22 +85,56 @@ async def listen_trades(ws_url, is_spot=False):
             print(f"[!] Error en trades WS {name}: {e}. Reconectando...")
             await asyncio.sleep(2)
 
-async def listen_book_ticker():
-    """ Escucha el BBO (Mejor Bid y Mejor Ask) para ver la liquidez inmediata """
-    url = f"{FUTURES_WS_URL}/{SYMBOL}@bookTicker"
+async def listen_depth():
+    """ Escucha el Order Book top 20 levels (Heatmap Pressure) """
+    url = f"{FUTURES_WS_URL}/{SYMBOL}@depth20@100ms"
     
     while True:
         try:
             async with websockets.connect(url) as ws:
-                print(f"[*] Conectado a Book Ticker (Liquidez Inmediata)")
+                print(f"[*] Conectado a Order Book Depth (Heatmap 20 Niveles)")
                 while True:
                     response = await ws.recv()
                     data = json.loads(response)
                     
-                    ctx.best_bid_price = float(data['b'])
-                    ctx.best_bid_qty = float(data['B'])
-                    ctx.best_ask_price = float(data['a'])
-                    ctx.best_ask_qty = float(data['A'])
+                    # Sumar liquidez en Bids y Asks
+                    total_bids = sum(float(p) * float(q) for p, q in data.get('bids', []))
+                    total_asks = sum(float(p) * float(q) for p, q in data.get('asks', []))
+                    
+                    ctx.depth_bids_usd = total_bids
+                    ctx.depth_asks_usd = total_asks
+        except Exception as e:
+            await asyncio.sleep(2)
+
+async def listen_liquidations():
+    """ Escucha liquidaciones en tiempo real (Rekt Stream) """
+    url = f"{FUTURES_WS_URL}/{SYMBOL}@forceOrder"
+    
+    while True:
+        try:
+            async with websockets.connect(url) as ws:
+                print(f"[*] Conectado a Liquidaciones (Rekt Stream)")
+                while True:
+                    response = await ws.recv()
+                    data = json.loads(response)
+                    
+                    order_data = data.get('o', {})
+                    if not order_data: continue
+                    
+                    side = order_data.get('S') # Si es SELL, fue un Long liquidado. Si es BUY, fue un Short liquidado.
+                    liq_type = "LONG" if side == "SELL" else "SHORT"
+                    
+                    price = float(order_data.get('p', 0))
+                    qty = float(order_data.get('q', 0))
+                    volume_usd = price * qty
+                    
+                    now = datetime.now()
+                    ctx.recent_liquidations.append((now, liq_type, volume_usd))
+                    
+                    # Limpiar historial viejo de liquidaciones (> 15 mins)
+                    cutoff = now.timestamp() - 900
+                    ctx.recent_liquidations = [(t, l, v) for t, l, v in ctx.recent_liquidations if t.timestamp() > cutoff]
+                    
         except Exception as e:
             await asyncio.sleep(2)
 
@@ -138,24 +185,35 @@ async def display_context():
         oi_color = "\033[92m" if oi_delta_pct > 0 else "\033[91m"
         reset = "\033[0m"
         
-        # Estado del Order Book Protegido
-        bid_usd = ctx.best_bid_qty * ctx.best_bid_price
-        ask_usd = ctx.best_ask_qty * ctx.best_ask_price
+        # Estado del Order Book Protegido (Heatmap)
+        bid_usd = ctx.depth_bids_usd
+        ask_usd = ctx.depth_asks_usd
         book_status = "Equilibrado"
-        if bid_usd > ask_usd * 1.5: book_status = "Fuerte Soporte (Bids>Asks)"
-        elif ask_usd > bid_usd * 1.5: book_status = "Fuerte Resistencia (Asks>Bids)"
+        if bid_usd > ask_usd * 1.5: book_status = "Fuerte Soporte Heatmap (Bids>Asks)"
+        elif ask_usd > bid_usd * 1.5: book_status = "Fuerte Resistencia Heatmap (Asks>Bids)"
         
-        print(f"\n[{now}] PRECIO BTC: ${ctx.price:,.2f}")
+        # Liquidaciones Recientes
+        long_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "LONG")
+        short_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "SHORT")
+        
+        # Relacion al POC
+        poc_status = "Neutral"
+        if ctx.price > ctx.session_poc_price > 0: poc_status = "Sobre el POC (Alcista)"
+        elif ctx.price < ctx.session_poc_price > 0: poc_status = "Bajo el POC (Bajista)"
+        
+        print(f"\n[{now}] PRECIO BTC: ${ctx.price:,.2f} | POC Sesion: ${ctx.session_poc_price:,.2f} ({poc_status})")
         print(f"├─ CVD Spot   : {s_cvd_color}${ctx.spot_cvd:,.0f}{reset}")
         print(f"├─ CVD Futuros: {f_cvd_color}${ctx.futures_cvd:,.0f}{reset}")
         print(f"├─ Open I.(5m): {oi_color}{ctx.oi_current:,.2f} BTC ({oi_delta_pct:+.3f}%){reset}")
-        print(f"└─ Book (BBO) : {book_status} | Bids: ${bid_usd:,.0f} vs Asks: ${ask_usd:,.0f}")
+        print(f"├─ Heatmap 20L: {book_status} | Bids: ${bid_usd:,.0f} vs Asks: ${ask_usd:,.0f}")
+        print(f"└─ Liqs (15m) : Longs liquidados: ${long_liqs:,.0f} | Shorts liquidados: ${short_liqs:,.0f}")
 
 async def main():
     await asyncio.gather(
         listen_trades(SPOT_WS_URL, is_spot=True),
         listen_trades(FUTURES_WS_URL, is_spot=False),
-        listen_book_ticker(),
+        listen_depth(),
+        listen_liquidations(),
         fetch_oi_loop(),
         display_context()
     )

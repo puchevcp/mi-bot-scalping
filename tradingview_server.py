@@ -7,7 +7,7 @@ import asyncio
 # Import the existing variables and start functions from our data engine
 from binance_data import (
     ctx, listen_trades, SPOT_WS_URL, FUTURES_WS_URL, 
-    listen_book_ticker, fetch_oi_loop, display_context
+    listen_depth, listen_liquidations, fetch_oi_loop, display_context
 )
 
 app = FastAPI(title="High-Probability Webhook Engine")
@@ -22,10 +22,11 @@ class TVAlert(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     # Start the Binance data engines in the background when the server starts
-    print("[*] Iniciando Motores de Order Flow...")
+    print("[*] Iniciando Motores de Order Flow Avanzados...")
     asyncio.create_task(listen_trades(SPOT_WS_URL, is_spot=True))
     asyncio.create_task(listen_trades(FUTURES_WS_URL, is_spot=False))
-    asyncio.create_task(listen_book_ticker())
+    asyncio.create_task(listen_depth())
+    asyncio.create_task(listen_liquidations())
     asyncio.create_task(fetch_oi_loop())
     asyncio.create_task(display_context())
 
@@ -42,34 +43,47 @@ async def receive_webhook(alert: TVAlert):
     oi_delta_pct = 0.0
     if ctx.oi_5m_ago > 0:
         oi_delta_pct = ((ctx.oi_current - ctx.oi_5m_ago) / ctx.oi_5m_ago) * 100
+        
+    # Liquidations
+    long_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "LONG")
+    short_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "SHORT")
     
     # Determine the context verdict
     verdict = ""
     prob_score = 0
+    total_score = 5 # Changed from 4 to 5 because of POC and Liquidations
     
     if is_buy_signal:
         if ctx.spot_cvd > 0: prob_score += 1     # +Spot buying
         if ctx.futures_cvd > 0: prob_score += 1  # +Futures buying
         if oi_delta_pct > 0: prob_score += 1     # +OI rising (new longs)
-        if ctx.best_bid_qty * ctx.best_bid_price > (ctx.best_ask_qty * ctx.best_ask_price) * 1.5: 
-            prob_score += 1                      # +Bid protection barrier
+        if ctx.depth_bids_usd > ctx.depth_asks_usd * 1.5: 
+            prob_score += 1                      # +Heatmap Bid protection barrier
+        if long_liqs > 500000 or ctx.price > ctx.session_poc_price > 0:
+            prob_score += 1                      # +Liquidity Sweep or Above POC
             
-        if prob_score >= 3:
-            verdict = "🔥 ALTA PROBABILIDAD (Confirmado por Order Flow)"
+        if prob_score >= 4:
+            verdict = "🔥 ALTA PROBABILIDAD (Confirmado por Order Flow Integral)"
+        elif prob_score >= 2:
+            verdict = "⚠️ PROBABILIDAD MEDIA (Fuerzas Divididas)"
         else:
-            verdict = "⚠️ BAJA PROBABILIDAD (Order Flow Dividido)"
+            verdict = "❌ BAJA PROBABILIDAD (Order Flow en Contra)"
             
     elif is_sell_signal:
         if ctx.spot_cvd < 0: prob_score += 1     # +Spot selling
         if ctx.futures_cvd < 0: prob_score += 1  # +Futures selling
         if oi_delta_pct > 0: prob_score += 1     # +OI rising (new shorts)
-        if ctx.best_ask_qty * ctx.best_ask_price > (ctx.best_bid_qty * ctx.best_bid_price) * 1.5: 
-            prob_score += 1                      # +Ask resistance barrier
+        if ctx.depth_asks_usd > ctx.depth_bids_usd * 1.5: 
+            prob_score += 1                      # +Heatmap Ask resistance barrier
+        if short_liqs > 500000 or (0 < ctx.price < ctx.session_poc_price):
+            prob_score += 1                      # +Liquidity Sweep or Below POC
             
-        if prob_score >= 3:
-            verdict = "🔥 ALTA PROBABILIDAD (Confirmado por Order Flow)"
+        if prob_score >= 4:
+            verdict = "🔥 ALTA PROBABILIDAD (Confirmado por Order Flow Integral)"
+        elif prob_score >= 2:
+            verdict = "⚠️ PROBABILIDAD MEDIA (Fuerzas Divididas)"
         else:
-            verdict = "⚠️ BAJA PROBABILIDAD (Order Flow Dividido)"
+            verdict = "❌ BAJA PROBABILIDAD (Order Flow en Contra)"
     else:
         verdict = "Señal Neutral"
             
@@ -79,13 +93,15 @@ async def receive_webhook(alert: TVAlert):
         f"<b>Par:</b> {alert.pair} ({alert.timeframe})\n"
         f"<b>Señal:</b> {alert.signal}\n"
         f"<b>Precio Actual:</b> ${alert.price:,.2f}\n"
-        f"<b>Veredicto Bot:</b> <b>{verdict}</b>\n\n"
+        f"<b>Veredicto Bot:</b> <b>{verdict}</b> ({prob_score}/{total_score})\n\n"
         f"📊 <b>CONTEXTO DE MERCADO EN VIVO</b>\n"
+        f"├─ <b>POC Sesión:</b> ${ctx.session_poc_price:,.2f}\n"
         f"├─ <b>CVD Spot:</b> ${ctx.spot_cvd:,.0f}\n"
         f"├─ <b>CVD Futuros:</b> ${ctx.futures_cvd:,.0f}\n"
         f"├─ <b>Delta OI (5m):</b> {oi_delta_pct:+.3f}%\n"
-        f"└─ <b>Book BBO (Bids):</b> ${ctx.best_bid_qty * ctx.best_bid_price:,.0f}\n"
-        f"└─ <b>Book BBO (Asks):</b> ${ctx.best_ask_qty * ctx.best_ask_price:,.0f}\n"
+        f"├─ <b>Heatmap Bids:</b> ${ctx.depth_bids_usd:,.0f}\n"
+        f"├─ <b>Heatmap Asks:</b> ${ctx.depth_asks_usd:,.0f}\n"
+        f"└─ <b>Liqs Recientes:</b> L: ${long_liqs:,.0f} | S: ${short_liqs:,.0f}\n"
     )
     
     if alert.optional_msg:
