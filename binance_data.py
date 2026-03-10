@@ -78,9 +78,9 @@ async def listen_trades(ws_url, is_spot=False):
                         if ctx.volume_profile:
                             ctx.session_poc_price = max(ctx.volume_profile, key=ctx.volume_profile.get)
                         
-                    # Mantenemos las alertas de super ballenas en futuros
-                    if not is_spot and volume_usd >= 1000000:
-                        trade_dir = "VENTA 🔴" if is_buyer_maker else "COMPRA 🟢"
+                    # Mantenemos las alertas de super ballenas en futuros (Ajustado a >$4M)
+                    if not is_spot and volume_usd >= 4000000:
+                        trade_dir = "VENTA \U0001f534" if is_buyer_maker else "COMPRA \U0001f7e2"
                         asyncio.create_task(send_telegram_message(
                             f"🐋 <b>SUPER BALLENA FUTUROS</b>\n{trade_dir} de ${volume_usd:,.0f} a ${price:,.2f}"
                         ))
@@ -255,12 +255,12 @@ async def display_context():
         elif ctx.price < ctx.session_poc_price > 0: poc_status = "Bajo el POC (Bajista)"
         
         print(f"\n[{now}] PRECIO BTC: ${ctx.price:,.2f} | POC Sesion: ${ctx.session_poc_price:,.2f} ({poc_status})")
-        print(f"├─ CVD Spot   : {s_cvd_color}${ctx.spot_cvd:,.0f}{reset}")
-        print(f"├─ CVD Futuros: {f_cvd_color}${ctx.futures_cvd:,.0f}{reset}")
-        print(f"├─ Open I.(5m): {oi_color}{ctx.oi_current:,.2f} BTC ({oi_delta_pct:+.3f}%){reset}")
-        print(f"├─ Delta 0-5% : {delta_color}${ctx.depth_0_5_delta_usd:,.0f}{reset}")
-        print(f"├─ 🐋 MURO 500+: {wall_str}")
-        print(f"└─ Liqs (15m) : Longs liquidados: ${long_liqs:,.0f} | Shorts liquidados: ${short_liqs:,.0f}")
+        print(f"|- CVD Spot   : {s_cvd_color}${ctx.spot_cvd:,.0f}{reset}")
+        print(f"|- CVD Futuros: {f_cvd_color}${ctx.futures_cvd:,.0f}{reset}")
+        print(f"|- Open I.(5m): {oi_color}{ctx.oi_current:,.2f} BTC ({oi_delta_pct:+.3f}%){reset}")
+        print(f"|- Delta 0-5% : {delta_color}${ctx.depth_0_5_delta_usd:,.0f}{reset}")
+        print(f"|- [W] MURO 500+: {wall_str}")
+        print(f"`- Liqs (15m) : Longs liquidados: ${long_liqs:,.0f} | Shorts liquidados: ${short_liqs:,.0f}")
 
 async def main():
     await asyncio.gather(
