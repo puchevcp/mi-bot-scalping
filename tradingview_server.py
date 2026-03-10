@@ -7,7 +7,7 @@ import asyncio
 # Import the existing variables and start functions from our data engine
 from binance_data import (
     ctx, listen_trades, SPOT_WS_URL, FUTURES_WS_URL, 
-    listen_depth, listen_liquidations, fetch_oi_loop, display_context
+    listen_local_orderbook, listen_liquidations, fetch_oi_loop, display_context
 )
 
 app = FastAPI(title="High-Probability Webhook Engine")
@@ -25,7 +25,7 @@ async def startup_event():
     print("[*] Iniciando Motores de Order Flow Avanzados...")
     asyncio.create_task(listen_trades(SPOT_WS_URL, is_spot=True))
     asyncio.create_task(listen_trades(FUTURES_WS_URL, is_spot=False))
-    asyncio.create_task(listen_depth())
+    asyncio.create_task(listen_local_orderbook())
     asyncio.create_task(listen_liquidations())
     asyncio.create_task(fetch_oi_loop())
     asyncio.create_task(display_context())
@@ -57,9 +57,9 @@ async def receive_webhook(alert: TVAlert):
         if ctx.spot_cvd > 0: prob_score += 1     # +Spot buying
         if ctx.futures_cvd > 0: prob_score += 1  # +Futures buying
         if oi_delta_pct > 0: prob_score += 1     # +OI rising (new longs)
-        if ctx.depth_bids_usd > ctx.depth_asks_usd * 1.5: 
+        if ctx.depth_0_5_delta_usd > 10000000:   # Mínimo +$10M netos hacia arriba (0-5%)
             prob_score += 1                      # +Heatmap Bid protection barrier
-        if long_liqs > 500000 or ctx.price > ctx.session_poc_price > 0:
+        if long_liqs > 500000 or (ctx.session_poc_price > 0 and ctx.price > ctx.session_poc_price):
             prob_score += 1                      # +Liquidity Sweep or Above POC
             
         if prob_score >= 4:
@@ -73,7 +73,7 @@ async def receive_webhook(alert: TVAlert):
         if ctx.spot_cvd < 0: prob_score += 1     # +Spot selling
         if ctx.futures_cvd < 0: prob_score += 1  # +Futures selling
         if oi_delta_pct > 0: prob_score += 1     # +OI rising (new shorts)
-        if ctx.depth_asks_usd > ctx.depth_bids_usd * 1.5: 
+        if ctx.depth_0_5_delta_usd < -10000000:  # Mínimo -$10M netos hacia abajo (0-5%)
             prob_score += 1                      # +Heatmap Ask resistance barrier
         if short_liqs > 500000 or (0 < ctx.price < ctx.session_poc_price):
             prob_score += 1                      # +Liquidity Sweep or Below POC
@@ -87,6 +87,13 @@ async def receive_webhook(alert: TVAlert):
     else:
         verdict = "Señal Neutral"
             
+    delta_sign = "+" if ctx.depth_0_5_delta_usd > 0 else ""
+    
+    wall_str = "Ninguno"
+    if ctx.heatmap_walls:
+        best_wall = ctx.heatmap_walls[0]
+        wall_str = f"{best_wall[1]:.0f} BTC en ${best_wall[0]:,.0f} ({best_wall[2]})"
+            
     # Always format the complete message so the user can make the final decision
     alert_text = (
         f"🚨 <b>SEÑAL TRADINGVIEW</b> 🚨\n\n"
@@ -99,8 +106,8 @@ async def receive_webhook(alert: TVAlert):
         f"├─ <b>CVD Spot:</b> ${ctx.spot_cvd:,.0f}\n"
         f"├─ <b>CVD Futuros:</b> ${ctx.futures_cvd:,.0f}\n"
         f"├─ <b>Delta OI (5m):</b> {oi_delta_pct:+.3f}%\n"
-        f"├─ <b>Heatmap Bids:</b> ${ctx.depth_bids_usd:,.0f}\n"
-        f"├─ <b>Heatmap Asks:</b> ${ctx.depth_asks_usd:,.0f}\n"
+        f"├─ <b>Delta Profundidad (0-5%):</b> {delta_sign}${ctx.depth_0_5_delta_usd:,.0f}\n"
+        f"├─ <b>🐋 Muro Heatmap (>500):</b> {wall_str}\n"
         f"└─ <b>Liqs Recientes:</b> L: ${long_liqs:,.0f} | S: ${short_liqs:,.0f}\n"
     )
     

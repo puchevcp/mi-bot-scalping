@@ -24,9 +24,13 @@ class MarketContext:
         self.oi_5m_ago = 0.0
         self.oi_history = [] # Para guardar el historico de los ultimos 5 min
         
-        # Heatmap / Depth (Top 20 Levels)
-        self.depth_bids_usd = 0.0
-        self.depth_asks_usd = 0.0
+        # Heatmap / Depth (Local Order Book Cache)
+        self.bids = {} # {price: qty}
+        self.asks = {}
+        self.last_update_id = 0
+        
+        self.depth_0_5_delta_usd = 0.0 # Bids(0-5%) - Asks(0-5%)
+        self.heatmap_walls = [] # [(price, btc_qty, 'BID'/'ASK')]
         
         # Liquidations (Rekt Stream)
         self.recent_liquidations = [] # [(timestamp, 'LONG'/'SHORT', usd_value)]
@@ -85,24 +89,72 @@ async def listen_trades(ws_url, is_spot=False):
             print(f"[!] Error en trades WS {name}: {e}. Reconectando...")
             await asyncio.sleep(2)
 
-async def listen_depth():
-    """ Escucha el Order Book top 20 levels (Heatmap Pressure) """
-    url = f"{FUTURES_WS_URL}/{SYMBOL}@depth20@100ms"
+async def listen_local_orderbook():
+    """ Construye y mantiene un Cache Local del Order Book para Kiyotaka Heatmap """
+    
+    # 1. Obtener REST Snapshot (1000 niveles)
+    snapshot_url = f"https://fapi.binance.com/fapi/v1/depth?symbol={SYMBOL.upper()}&limit=1000"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(snapshot_url) as resp:
+            data = await resp.json()
+            ctx.last_update_id = data.get('lastUpdateId', 0)
+            
+            ctx.bids = {float(p): float(q) for p, q in data.get('bids', [])}
+            ctx.asks = {float(p): float(q) for p, q in data.get('asks', [])}
+            
+    # 2. Conectar al WebSocket de Updates y mantener cache
+    url = f"{FUTURES_WS_URL}/{SYMBOL}@depth@100ms"
     
     while True:
         try:
             async with websockets.connect(url) as ws:
-                print(f"[*] Conectado a Order Book Depth (Heatmap 20 Niveles)")
+                print(f"[*] Conectado a Order Book Diff Stream (Heatmap Cache)")
                 while True:
                     response = await ws.recv()
                     data = json.loads(response)
                     
-                    # Sumar liquidez en Bids y Asks
-                    total_bids = sum(float(p) * float(q) for p, q in data.get('bids', []))
-                    total_asks = sum(float(p) * float(q) for p, q in data.get('asks', []))
+                    if data['u'] <= ctx.last_update_id:
+                        continue # Descartar updates viejos
+                        
+                    # Aplicar Diff (Si qty es 0.00, se borra el nivel)
+                    for p_str, q_str in data.get('b', []):
+                        p, q = float(p_str), float(q_str)
+                        if q == 0.0: ctx.bids.pop(p, None)
+                        else: ctx.bids[p] = q
+                        
+                    for p_str, q_str in data.get('a', []):
+                        p, q = float(p_str), float(q_str)
+                        if q == 0.0: ctx.asks.pop(p, None)
+                        else: ctx.asks[p] = q
+                        
+                    ctx.last_update_id = data['u']
                     
-                    ctx.depth_bids_usd = total_bids
-                    ctx.depth_asks_usd = total_asks
+                    # --- Calcular Heatmap Data una vez por segundo (aprox cada 10 mensajes) ---
+                    if (data['u'] % 5) == 0 and ctx.price > 0:
+                        # Limpiar precios muy lejanos para no saturar RAM
+                        min_p, max_p = ctx.price * 0.90, ctx.price * 1.10
+                        ctx.bids = {p: q for p, q in ctx.bids.items() if p > min_p}
+                        ctx.asks = {p: q for p, q in ctx.asks.items() if p < max_p}
+                        
+                        # 0-5% Depth Delta
+                        limit_bid_5 = ctx.price * 0.95
+                        limit_ask_5 = ctx.price * 1.05
+                        
+                        bids_5_sum = sum(p * q for p, q in ctx.bids.items() if p >= limit_bid_5)
+                        asks_5_sum = sum(p * q for p, q in ctx.asks.items() if p <= limit_ask_5)
+                        ctx.depth_0_5_delta_usd = bids_5_sum - asks_5_sum
+                        
+                        # Buscar Muros (Whales en Límite) > 500 BTC
+                        walls = []
+                        for p, q in ctx.bids.items():
+                            if q >= 500 and p >= limit_bid_5:
+                                walls.append((p, q, 'BID (Soporte)'))
+                        for p, q in ctx.asks.items():
+                            if q >= 500 and p <= limit_ask_5:
+                                walls.append((p, q, 'ASK (Resistencia)'))
+                                
+                        ctx.heatmap_walls = sorted(walls, key=lambda x: x[1], reverse=True) # Sort by amount
+
         except Exception as e:
             await asyncio.sleep(2)
 
@@ -185,12 +237,13 @@ async def display_context():
         oi_color = "\033[92m" if oi_delta_pct > 0 else "\033[91m"
         reset = "\033[0m"
         
-        # Estado del Order Book Protegido (Heatmap)
-        bid_usd = ctx.depth_bids_usd
-        ask_usd = ctx.depth_asks_usd
-        book_status = "Equilibrado"
-        if bid_usd > ask_usd * 1.5: book_status = "Fuerte Soporte Heatmap (Bids>Asks)"
-        elif ask_usd > bid_usd * 1.5: book_status = "Fuerte Resistencia Heatmap (Asks>Bids)"
+        # Order Book (Heatmap)
+        delta_color = "\033[92m" if ctx.depth_0_5_delta_usd > 0 else "\033[91m"
+        
+        wall_str = "Ninguno"
+        if ctx.heatmap_walls:
+            best_wall = ctx.heatmap_walls[0]
+            wall_str = f"{best_wall[1]:.0f} BTC en ${best_wall[0]:,.0f} ({best_wall[2]})"
         
         # Liquidaciones Recientes
         long_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "LONG")
@@ -205,14 +258,15 @@ async def display_context():
         print(f"├─ CVD Spot   : {s_cvd_color}${ctx.spot_cvd:,.0f}{reset}")
         print(f"├─ CVD Futuros: {f_cvd_color}${ctx.futures_cvd:,.0f}{reset}")
         print(f"├─ Open I.(5m): {oi_color}{ctx.oi_current:,.2f} BTC ({oi_delta_pct:+.3f}%){reset}")
-        print(f"├─ Heatmap 20L: {book_status} | Bids: ${bid_usd:,.0f} vs Asks: ${ask_usd:,.0f}")
+        print(f"├─ Delta 0-5% : {delta_color}${ctx.depth_0_5_delta_usd:,.0f}{reset}")
+        print(f"├─ 🐋 MURO 500+: {wall_str}")
         print(f"└─ Liqs (15m) : Longs liquidados: ${long_liqs:,.0f} | Shorts liquidados: ${short_liqs:,.0f}")
 
 async def main():
     await asyncio.gather(
         listen_trades(SPOT_WS_URL, is_spot=True),
         listen_trades(FUTURES_WS_URL, is_spot=False),
-        listen_depth(),
+        listen_local_orderbook(),
         listen_liquidations(),
         fetch_oi_loop(),
         display_context()
