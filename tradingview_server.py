@@ -84,7 +84,8 @@ async def check_5m_structure(is_buy_signal: bool) -> tuple[bool, str]:
                         
                 return is_aligned, msg
         except Exception as e:
-            return False, f"Error API 5m"
+            print(f"[!] Error en check_5m_structure: {e}")
+            return False, f"No data (Error API)"
             
 @app.post("/webhook")
 async def receive_webhook(request: Request):
