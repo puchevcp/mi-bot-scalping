@@ -35,11 +35,16 @@ async def startup_event():
 async def check_5m_structure(is_buy_signal: bool) -> tuple[bool, str]:
     """ Fetch last 4 5-minute candles to check short-term trend and volume. """
     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={SYMBOL.upper()}&interval=5m&limit=4"
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url) as resp:
+    
+    # Binance a veces bloquea IPs de nube si no hay User-Agent
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=5) as resp:
                 data = await resp.json()
-                if len(data) < 4: return False, "No data"
+                if not isinstance(data, list) or len(data) < 4: 
+                    return False, f"No data ({resp.status})"
                 
                 # data = [ [Open time, Open, High, Low, Close, Volume, Close time, ...], ... ]
                 candles = []
@@ -83,9 +88,12 @@ async def check_5m_structure(is_buy_signal: bool) -> tuple[bool, str]:
                         msg = "Estructura 5m Rompiendo al Alza"
                         
                 return is_aligned, msg
-        except Exception as e:
-            print(f"[!] Error en check_5m_structure: {e}")
-            return False, f"No data (Error API)"
+    except asyncio.TimeoutError:
+        print("[!] Timeout conectando a Binance 5m Klines")
+        return False, "Timeout API"
+    except Exception as e:
+        print(f"[!] Error en check_5m_structure: {e}")
+        return False, f"Error API: {type(e).__name__}"
             
 @app.post("/webhook")
 async def receive_webhook(request: Request):
