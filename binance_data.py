@@ -92,8 +92,8 @@ async def listen_trades(ws_url, is_spot=False):
 async def listen_local_orderbook():
     """ Construye y mantiene un Cache Local del Order Book para Kiyotaka Heatmap """
     
-    # 1. Obtener REST Snapshot (1000 niveles)
-    snapshot_url = f"https://fapi.binance.com/fapi/v1/depth?symbol={SYMBOL.upper()}&limit=1000"
+    # 1. Obtener REST Snapshot (1000 niveles) usando endpoint alternativo
+    snapshot_url = f"https://fapi.binance.info/fapi/v1/depth?symbol={SYMBOL.upper()}&limit=1000"
     async with aiohttp.ClientSession() as session:
         async with session.get(snapshot_url) as resp:
             data = await resp.json()
@@ -192,7 +192,7 @@ async def listen_liquidations():
 
 async def fetch_oi_loop():
     """ Consulta el Open Interest via REST periodicamente para ver la variacion """
-    url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={SYMBOL.upper()}"
+    url = f"https://fapi.binance.info/fapi/v1/openInterest?symbol={SYMBOL.upper()}"
     
     async with aiohttp.ClientSession() as session:
         while True:
