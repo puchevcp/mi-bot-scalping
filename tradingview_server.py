@@ -34,7 +34,8 @@ async def startup_event():
 
 async def check_5m_structure(is_buy_signal: bool) -> tuple[bool, str]:
     """ Fetch last 4 5-minute candles to check short-term trend and volume. """
-    url = f"https://fapi.binance.info/fapi/v1/klines?symbol={SYMBOL.upper()}&interval=5m&limit=4"
+    # Usamos Spot API (api.binance.com) porque fapi (Futuros) bloquea IPs de la nube (Error 418/451)
+    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL.upper()}&interval=5m&limit=4"
     
     # Binance a veces bloquea IPs de nube si no hay User-Agent
     headers = {'User-Agent': 'Mozilla/5.0'}
