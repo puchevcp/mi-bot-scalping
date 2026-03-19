@@ -38,6 +38,9 @@ class MarketContext:
         # Volume Profile (POC)
         self.volume_profile = {} # {rounded_price: volume_usd}
         self.session_poc_price = 0.0
+        
+        # V2: Dynamic Tracking of Heatmap Limit Walls
+        self.tracked_walls = {} # {price: (btc_qty, 'BID'/'ASK')}
 
 ctx = MarketContext()
 
@@ -81,9 +84,8 @@ async def listen_trades(ws_url, is_spot=False):
                     # Mantenemos las alertas de super ballenas en futuros (Ajustado a >$4M)
                     if not is_spot and volume_usd >= 4000000:
                         trade_dir = "VENTA \U0001f534" if is_buyer_maker else "COMPRA \U0001f7e2"
-                        asyncio.create_task(send_telegram_message(
-                            f"🐋 <b>SUPER BALLENA FUTUROS</b>\n{trade_dir} de ${volume_usd:,.0f} a ${price:,.2f}"
-                        ))
+                        # V2: Deshabilitadas las alertas directas a Telegram por Market Orders para usar Muros Dinamicos.
+                        pass
                         
         except Exception as e:
             print(f"[!] Error en trades WS {name}: {e}. Reconectando...")
@@ -144,16 +146,45 @@ async def listen_local_orderbook():
                         asks_5_sum = sum(p * q for p, q in ctx.asks.items() if p <= limit_ask_5)
                         ctx.depth_0_5_delta_usd = bids_5_sum - asks_5_sum
                         
-                        # Buscar Muros (Whales en Límite) > 500 BTC
+                        # Buscar Muros (Whales en Límite) > 400 BTC (V2: 400 BTC threshold)
                         walls = []
                         for p, q in ctx.bids.items():
-                            if q >= 500 and p >= limit_bid_5:
+                            if q >= 400 and p >= limit_bid_5:
                                 walls.append((p, q, 'BID (Soporte)'))
                         for p, q in ctx.asks.items():
-                            if q >= 500 and p <= limit_ask_5:
+                            if q >= 400 and p <= limit_ask_5:
                                 walls.append((p, q, 'ASK (Resistencia)'))
                                 
                         ctx.heatmap_walls = sorted(walls, key=lambda x: x[1], reverse=True) # Sort by amount
+                        
+                        # V2: Rastreo dinamico de muros
+                        current_wall_prices = set()
+                        for p, q, w_type in ctx.heatmap_walls:
+                            current_wall_prices.add(p)
+                            if p not in ctx.tracked_walls:
+                                # ¡Muro nuevo detectado!
+                                ctx.tracked_walls[p] = (q, w_type)
+                                try:
+                                    asyncio.create_task(send_telegram_message(f"🚨 <b>¡NUEVO MURO DETECTADO!</b>\n{q:,.0f} BTC Limit en ${p:,.2f} ({w_type})"))
+                                except Exception: pass
+                            else:
+                                ctx.tracked_walls[p] = (q, w_type) # Actualizar tamano
+                                
+                        # Revisar Muros removidos o consumidos
+                        for p in list(ctx.tracked_walls.keys()):
+                            if p not in current_wall_prices:
+                                old_q, w_type = ctx.tracked_walls[p]
+                                # Revisar tamano real actual
+                                actual_q = ctx.bids.get(p, 0) if "BID" in w_type else ctx.asks.get(p, 0)
+                                
+                                if actual_q < 100: # Si bajo a menos de 100 BTC, consideramos que se esfumo o se ejecuto
+                                    # Solo avisamos si el precio sigue relativamente cerca (distancia 6%)
+                                    distancia = abs(ctx.price - p) / ctx.price
+                                    if distancia <= 0.06:
+                                        try:
+                                            asyncio.create_task(send_telegram_message(f"👻 <b>¡MURO ELIMINADO/CONSUMIDO!</b>\nEl muro de ${p:,.2f} ({w_type}) ha desaparecido. (Restante: {actual_q:,.0f} BTC)"))
+                                        except Exception: pass
+                                    del ctx.tracked_walls[p]
 
         except Exception as e:
             await asyncio.sleep(2)

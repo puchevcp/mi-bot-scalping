@@ -31,70 +31,89 @@ async def startup_event():
     asyncio.create_task(listen_liquidations())
     asyncio.create_task(fetch_oi_loop())
     asyncio.create_task(display_context())
+import math
+from datetime import datetime, timezone
 
-async def check_5m_structure(is_buy_signal: bool) -> tuple[bool, str]:
-    """ Fetch last 4 5-minute candles to check short-term trend and volume. """
-    # Usamos Spot API (api.binance.com) porque fapi (Futuros) bloquea IPs de la nube (Error 418/451)
-    url = f"https://api.binance.com/api/v3/klines?symbol={SYMBOL.upper()}&interval=5m&limit=4"
+def analyze_structure(data, is_buy_signal, tf_name) -> tuple[bool, str]:
+    if not isinstance(data, list) or len(data) < 4: 
+        return False, f"No data ({tf_name})"
+        
+    bull_vol = 0.0
+    bear_vol = 0.0
+    candles = []
     
-    # Binance a veces bloquea IPs de nube si no hay User-Agent
+    for c in data:
+        o, h, l, close, v = float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])
+        candles.append({"open": o, "high": h, "low": l, "close": close, "vol": v})
+        if close > o: bull_vol += v
+        else: bear_vol += v
+        
+    if is_buy_signal:
+        if candles[3]["low"] >= candles[1]["low"] * 0.999: # HL o plano
+            if bull_vol > bear_vol: return True, "Alcista (HL) + Vol. Compra"
+            else: return False, "Sin Vol. Comprador"
+        else: return False, "Rompiendo a la Baja"
+    else:
+        if candles[3]["high"] <= candles[1]["high"] * 1.001: # LH o plano
+            if bear_vol > bull_vol: return True, "Bajista (LH) + Vol. Venta"
+            else: return False, "Sin Vol. Vendedor"
+        else: return False, "Rompiendo al Alza"
+
+def calculate_vwap(data):
+    if not isinstance(data, list): return None, None
+    now_utc = datetime.now(timezone.utc)
+    start_of_day_ts = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc).timestamp() * 1000
+    
+    todays_candles = [c for c in data if c[0] >= start_of_day_ts]
+    if not todays_candles: return None, None
+    
+    cum_vol = 0.0
+    cum_vol_price = 0.0
+    for c in todays_candles:
+        h, l, close, vol = float(c[2]), float(c[3]), float(c[4]), float(c[5])
+        typ_price = (h + l + close) / 3.0
+        cum_vol += vol
+        cum_vol_price += typ_price * vol
+        
+    vwap = cum_vol_price / cum_vol if cum_vol > 0 else 0
+    
+    variances = []
+    for c in todays_candles:
+        h, l, close, vol = float(c[2]), float(c[3]), float(c[4]), float(c[5])
+        typ_price = (h + l + close) / 3.0
+        variances.append((vol / cum_vol) * ((typ_price - vwap) ** 2))
+        
+    stdev = math.sqrt(sum(variances))
+    return vwap, stdev
+
+async def fetch_kline(session, url):
+    async with session.get(url, timeout=5) as resp:
+        return await resp.json()
+
+async def get_multiframe_context(symbol: str, is_buy_signal: bool):
+    urls = [
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=3m&limit=4",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=4",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=4",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=288" # Dia entero
+    ]
     headers = {'User-Agent': 'Mozilla/5.0'}
-    
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=5) as resp:
-                data = await resp.json()
-                if not isinstance(data, list) or len(data) < 4: 
-                    return False, f"No data ({resp.status})"
-                
-                # data = [ [Open time, Open, High, Low, Close, Volume, Close time, ...], ... ]
-                candles = []
-                bull_vol = 0.0
-                bear_vol = 0.0
-                
-                for candle in data:
-                    o = float(candle[1])
-                    h = float(candle[2])
-                    l = float(candle[3])
-                    c = float(candle[4])
-                    v = float(candle[5])
-                    candles.append({"open": o, "high": h, "low": l, "close": c, "vol": v})
-                    
-                    if c > o: bull_vol += v
-                    else: bear_vol += v
-                
-                # Check Market Structure (Higher Lows for BUY, Lower Highs for SELL)
-                msg = ""
-                is_aligned = False
-                
-                if is_buy_signal:
-                    # Check if the lows are generally stepping up or flat, not dumping
-                    if candles[3]["low"] >= candles[1]["low"] * 0.999: # Allow tiny wick tolerance
-                        if bull_vol > bear_vol:
-                            is_aligned = True
-                            msg = "Estructura Alcista (HL) + Vol. Comprador"
-                        else:
-                            msg = "Sin Vol. Comprador"
-                    else:
-                        msg = "Estructura 5m Rompiendo a la Baja"
-                else:
-                    # Check if the highs are stepping down or flat
-                    if candles[3]["high"] <= candles[1]["high"] * 1.001:
-                        if bear_vol > bull_vol:
-                            is_aligned = True
-                            msg = "Estructura Bajista (LH) + Vol. Vendedor"
-                        else:
-                            msg = "Sin Vol. Vendedor"
-                    else:
-                        msg = "Estructura 5m Rompiendo al Alza"
-                        
-                return is_aligned, msg
+            tasks = [fetch_kline(session, u) for u in urls]
+            res_3m, res_5m, res_15m, res_vwap = await asyncio.gather(*tasks)
+            
+            align_3m, msg_3m = analyze_structure(res_3m, is_buy_signal, "3m")
+            align_5m, msg_5m = analyze_structure(res_5m, is_buy_signal, "5m")
+            align_15m, msg_15m = analyze_structure(res_15m, is_buy_signal, "15m")
+            vwap, stdev = calculate_vwap(res_vwap)
+            
+            return align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev
     except asyncio.TimeoutError:
-        print("[!] Timeout conectando a Binance 5m Klines")
-        return False, "Timeout API"
+        return False, "Timeout", False, "Timeout", False, "Timeout", None, None
     except Exception as e:
-        print(f"[!] Error en check_5m_structure: {e}")
-        return False, f"Error API: {type(e).__name__}"
+        print(f"[!] Error multiframe: {e}")
+        return False, "Error API", False, "Error API", False, "Error API", None, None
             
 @app.post("/webhook")
 async def receive_webhook(request: Request):
@@ -115,13 +134,13 @@ async def receive_webhook(request: Request):
     long_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "LONG")
     short_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "SHORT")
     
-    # Check 5m Market Structure
-    ms_aligned, ms_msg = await check_5m_structure(is_buy_signal)
+    # Check 3m/5m/15m and VWAP
+    align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
     
     # Determine the context verdict
     verdict = ""
     prob_score = 0
-    total_score = 6 # Added 5m Structure check
+    total_score = 8 # Spotlight on 8 dynamic elements (Spot, Fut, OI, Depth, POC, 3m/5m/15m Align)
     
     # Checkmark display states
     spot_check = "❌"
@@ -129,10 +148,26 @@ async def receive_webhook(request: Request):
     oi_check = "❌"
     depth_check = "❌"
     poc_liq_check = "❌"
-    ms_check = "✅" if ms_aligned else "❌"
+    ms_3_check = "✅" if align_3m else "❌"
+    ms_5_check = "✅" if align_5m else "❌"
+    ms_15_check = "✅" if align_15m else "❌"
     
-    if ms_aligned:
-        prob_score += 1
+    if align_3m: prob_score += 1
+    if align_5m: prob_score += 1
+    if align_15m: prob_score += 1
+    
+    vwap_msg = "No data"
+    if vwap:
+        if is_buy_signal and ctx.price > vwap:
+            vwap_msg = f"✅ Precio ARRIBA del VWAP (${vwap:,.1f})"
+        elif is_sell_signal and ctx.price < vwap:
+            vwap_msg = f"✅ Precio DEBAJO del VWAP (${vwap:,.1f})"
+        else:
+            vwap_msg = f"❌ Precio contra el VWAP (${vwap:,.1f})"
+            
+        # Optional: Check if resting on deviation bands
+        lower_band1, upper_band1 = vwap - stdev, vwap + stdev
+        vwap_msg += f" [Desviación: ±${stdev:,.0f}]"
     
     if is_buy_signal:
         if ctx.spot_cvd > 0: 
@@ -151,9 +186,9 @@ async def receive_webhook(request: Request):
             prob_score += 1                      # +Liquidity Sweep or Above POC
             poc_liq_check = "✅"
             
-        if prob_score >= 5:
+        if prob_score >= 6:
             verdict = "🔥 ALTA PROBABILIDAD (Confirmado por Order Flow Integral)"
-        elif prob_score >= 3:
+        elif prob_score >= 4:
             verdict = "⚠️ PROBABILIDAD MEDIA (Fuerzas Divididas)"
         else:
             verdict = "❌ BAJA PROBABILIDAD (Order Flow en Contra)"
@@ -175,9 +210,9 @@ async def receive_webhook(request: Request):
             prob_score += 1                      # +Liquidity Sweep or Below POC
             poc_liq_check = "✅"
             
-        if prob_score >= 5:
+        if prob_score >= 6:
             verdict = "🔥 ALTA PROBABILIDAD (Confirmado por Order Flow Integral)"
-        elif prob_score >= 3:
+        elif prob_score >= 4:
             verdict = "⚠️ PROBABILIDAD MEDIA (Fuerzas Divididas)"
         else:
             verdict = "❌ BAJA PROBABILIDAD (Order Flow en Contra)"
@@ -200,7 +235,10 @@ async def receive_webhook(request: Request):
         f"<b>Veredicto Bot:</b> <b>{verdict}</b> ({prob_score}/{total_score})\n\n"
         f"📊 <b>CONTEXTO DE MERCADO EN VIVO</b>\n"
         f"├─ [{poc_liq_check}] <b>POC Sesión:</b> ${ctx.session_poc_price:,.2f}\n"
-        f"├─ [{ms_check}] <b>Estructura 5m:</b> {ms_msg}\n"
+        f"├─ <b>VWAP:</b> {vwap_msg}\n"
+        f"├─ [{ms_15_check}] <b>Estructura 15m (Macro):</b> {msg_15m}\n"
+        f"├─ [{ms_5_check}] <b>Estructura 5m (Principal):</b> {msg_5m}\n"
+        f"├─ [{ms_3_check}] <b>Estructura 3m (Gatillo):</b> {msg_3m}\n"
         f"├─ [{spot_check}] <b>CVD Spot:</b> ${ctx.spot_cvd:,.0f}\n"
         f"├─ [{fut_check}] <b>CVD Futuros:</b> ${ctx.futures_cvd:,.0f}\n"
         f"├─ [{oi_check}] <b>Delta OI (5m):</b> {oi_delta_pct:+.3f}%\n"
