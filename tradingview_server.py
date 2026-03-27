@@ -86,6 +86,23 @@ def calculate_vwap(data):
     stdev = math.sqrt(sum(variances))
     return vwap, stdev
 
+def calculate_mfi(data, period=60):
+    if not isinstance(data, list) or len(data) < period + 1: return None, None
+    
+    # Formula VMC: SMA(((Close - Open) / (High - Low)) * 150, period) - 2.5
+    mfi_values = []
+    for c in data:
+        o, h, l, close = float(c[1]), float(c[2]), float(c[3]), float(c[4])
+        # Evitar division por cero si high == low
+        raw_mfi = (((close - o) / (h - l)) * 150) if (h - l) != 0 else 0
+        mfi_values.append(raw_mfi - 2.5)
+    
+    # Calcular SMA de los ultimos 'period' valores para el actual y el anterior
+    current_mfi_sma = sum(mfi_values[-period:]) / period
+    prev_mfi_sma = sum(mfi_values[-(period+1):-1]) / period
+    
+    return current_mfi_sma, prev_mfi_sma
+
 async def fetch_kline(session, url):
     async with session.get(url, timeout=5) as resp:
         return await resp.json()
@@ -107,8 +124,9 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             align_5m, msg_5m = analyze_structure(res_5m, is_buy_signal, "5m")
             align_15m, msg_15m = analyze_structure(res_15m, is_buy_signal, "15m")
             vwap, stdev = calculate_vwap(res_vwap)
+            mfi_now, mfi_prev = calculate_mfi(res_vwap)
             
-            return align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev
+            return align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev, mfi_now, mfi_prev
     except asyncio.TimeoutError:
         return False, "Timeout", False, "Timeout", False, "Timeout", None, None
     except Exception as e:
@@ -134,13 +152,13 @@ async def receive_webhook(request: Request):
     long_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "LONG")
     short_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "SHORT")
     
-    # Check 3m/5m/15m and VWAP
-    align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
+    # Check 3m/5m/15m and VWAP/MFI
+    align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev, mfi_now, mfi_prev = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
     
     # Determine the context verdict
     verdict = ""
     prob_score = 0
-    total_score = 8 # Spotlight on 8 dynamic elements (Spot, Fut, OI, Depth, POC, 3m/5m/15m Align)
+    total_score = 9 # Spotlight on 9 dynamic elements (Spot, Fut, OI, Depth, POC, 3m/5m/15m, MFI)
     
     # Checkmark display states
     spot_check = "❌"
@@ -151,6 +169,7 @@ async def receive_webhook(request: Request):
     ms_3_check = "✅" if align_3m else "❌"
     ms_5_check = "✅" if align_5m else "❌"
     ms_15_check = "✅" if align_15m else "❌"
+    mfi_check = "❌"
     
     if align_3m: prob_score += 1
     if align_5m: prob_score += 1
@@ -168,6 +187,20 @@ async def receive_webhook(request: Request):
         # Optional: Check if resting on deviation bands
         lower_band1, upper_band1 = vwap - stdev, vwap + stdev
         vwap_msg += f" [Desviación: ±${stdev:,.0f}]"
+        
+    mfi_msg = "No data"
+    if mfi_now is not None:
+        mfi_dir = "📈 Creciendo" if mfi_now > mfi_prev else "📉 Bajando"
+        mfi_state = "Saliendo de zona roja" if (mfi_now < 0 and mfi_now > mfi_prev) else ("Entrando a zona verde" if mfi_now > 0 and mfi_now > mfi_prev else "Debilitándose")
+        mfi_msg = f"{mfi_now:+.1f} ({mfi_dir})"
+        
+        # Scoring MFI
+        if is_buy_signal and mfi_now > mfi_prev: # MFI subiendo es bueno para comprar
+            prob_score += 1
+            mfi_check = "✅"
+        elif is_sell_signal and mfi_now < mfi_prev: # MFI bajando es bueno para vender
+            prob_score += 1
+            mfi_check = "✅"
     
     if is_buy_signal:
         if ctx.spot_cvd > 0: 
@@ -210,9 +243,9 @@ async def receive_webhook(request: Request):
             prob_score += 1                      # +Liquidity Sweep or Below POC
             poc_liq_check = "✅"
             
-        if prob_score >= 6:
+        if prob_score >= 7:
             verdict = "🔥 ALTA PROBABILIDAD (Confirmado por Order Flow Integral)"
-        elif prob_score >= 4:
+        elif prob_score >= 5:
             verdict = "⚠️ PROBABILIDAD MEDIA (Fuerzas Divididas)"
         else:
             verdict = "❌ BAJA PROBABILIDAD (Order Flow en Contra)"
@@ -239,6 +272,7 @@ async def receive_webhook(request: Request):
         f"├─ [{ms_15_check}] <b>Estructura 15m (Macro):</b> {msg_15m}\n"
         f"├─ [{ms_5_check}] <b>Estructura 5m (Principal):</b> {msg_5m}\n"
         f"├─ [{ms_3_check}] <b>Estructura 3m (Gatillo):</b> {msg_3m}\n"
+        f"├─ [{mfi_check}] <b>MFI (Money Flow):</b> {mfi_msg}\n"
         f"├─ [{spot_check}] <b>CVD Spot:</b> ${ctx.spot_cvd:,.0f}\n"
         f"├─ [{fut_check}] <b>CVD Futuros:</b> ${ctx.futures_cvd:,.0f}\n"
         f"├─ [{oi_check}] <b>Delta OI (5m):</b> {oi_delta_pct:+.3f}%\n"
