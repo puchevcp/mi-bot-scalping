@@ -1,7 +1,7 @@
 import asyncio
 import json
 import websockets
-from datetime import datetime
+from datetime import datetime, timezone
 import aiohttp
 from telegram_notifier import send_telegram_message
 
