@@ -41,6 +41,9 @@ class MarketContext:
         
         # V2: Dynamic Tracking of Heatmap Limit Walls
         self.tracked_walls = {} # {price: (btc_qty, 'BID'/'ASK')}
+        
+        # Tracking the current UTC Day to reset "Session" metrics
+        self.current_session_day = datetime.now(timezone.utc).day
 
 ctx = MarketContext()
 
@@ -61,6 +64,16 @@ async def listen_trades(ws_url, is_spot=False):
                     qty = float(data['q'])
                     is_buyer_maker = data['m'] # True = Sell a mercado, False = Buy a mercado
                     volume_usd = price * qty
+                    
+                    # Check for UTC Midnight Reset (New Session)
+                    now_utc = datetime.now(timezone.utc)
+                    if now_utc.day != ctx.current_session_day:
+                        ctx.spot_cvd = 0.0
+                        ctx.futures_cvd = 0.0
+                        ctx.volume_profile.clear()
+                        ctx.session_poc_price = 0.0
+                        ctx.current_session_day = now_utc.day
+                        print(f"🔄 [+00:00 UTC] Sesión reseteada (CVD, POC y Perfil de Volumen limpios).")
                     
                     if not is_spot:
                         ctx.price = price # Actualizamos precio global con futuros
