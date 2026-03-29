@@ -1,9 +1,12 @@
 import aiohttp
 import asyncio
 
+import os
+
 # Token and Chat ID provided by the user
-TELEGRAM_TOKEN = "8405777043:AAF35OTEDSTOM3B7FsUKVJVyFFbN04Wr7Po"
-CHAT_ID = "1347866672"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID = os.environ.get("CHAT_ID", "")
+
 
 async def send_telegram_message(text: str):
     """
