@@ -35,29 +35,39 @@ import math
 from datetime import datetime, timezone
 
 def analyze_structure(data, is_buy_signal, tf_name) -> tuple[bool, str]:
-    if not isinstance(data, list) or len(data) < 4: 
-        return False, f"No data ({tf_name})"
+    if not isinstance(data, list) or len(data) < 11: 
+        return False, f"Pocos datos ({tf_name})"
         
+    # Extraer ultimas 4 velas para la estructura
+    struct_candles = data[-4:]
     bull_vol = 0.0
     bear_vol = 0.0
     candles = []
     
-    for c in data:
+    for c in struct_candles:
         o, h, l, close, v = float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])
         candles.append({"open": o, "high": h, "low": l, "close": close, "vol": v})
         if close > o: bull_vol += v
         else: bear_vol += v
         
+    # Calcular RVOL (Volumen de la ultima vela vs promedio de las 10 anteriores)
+    vol_actual = candles[-1]["vol"]
+    vols_hist = [float(c[5]) for c in data[-11:-1]]
+    vol_promedio = sum(vols_hist) / len(vols_hist)
+    rvol = vol_actual / vol_promedio if vol_promedio > 0 else 1.0
+    
+    rvol_tag = f" ⭐ (RVOL {rvol:.1f})" if rvol >= 1.2 else ""
+    
     if is_buy_signal:
         if candles[3]["low"] >= candles[1]["low"] * 0.999: # HL o plano
-            if bull_vol > bear_vol: return True, "Alcista (HL) + Vol. Compra"
-            else: return False, "Sin Vol. Comprador"
-        else: return False, "Rompiendo a la Baja"
+            if bull_vol > bear_vol: return True, f"Alcista (HL) + Vol. Compra{rvol_tag}"
+            else: return False, f"Sin Vol. Comprador{rvol_tag}"
+        else: return False, f"Rompiendo a la Baja{rvol_tag}"
     else:
         if candles[3]["high"] <= candles[1]["high"] * 1.001: # LH o plano
-            if bear_vol > bull_vol: return True, "Bajista (LH) + Vol. Venta"
-            else: return False, "Sin Vol. Vendedor"
-        else: return False, "Rompiendo al Alza"
+            if bear_vol > bull_vol: return True, f"Bajista (LH) + Vol. Venta{rvol_tag}"
+            else: return False, f"Sin Vol. Vendedor{rvol_tag}"
+        else: return False, f"Rompiendo al Alza{rvol_tag}"
 
 def calculate_vwap(data):
     if not isinstance(data, list): return None, None
@@ -109,9 +119,9 @@ async def fetch_kline(session, url):
 
 async def get_multiframe_context(symbol: str, is_buy_signal: bool):
     urls = [
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=3m&limit=4",
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=4",
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=4",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=3m&limit=15",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=15",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=15",
         f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=288" # Dia entero
     ]
     headers = {'User-Agent': 'Mozilla/5.0'}
