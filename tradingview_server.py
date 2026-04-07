@@ -188,8 +188,7 @@ async def receive_webhook(request: Request):
     # Determine the context verdict
     verdict = ""
     prob_score = 0
-    total_score = 9 
-    
+    total_score = 10 # 3m, 5m, 15m, WT Zone, MFI, Spot, Fut, OI, Depth, POC/Liqs    
     # Sniper ELITE Logic (Derived from 4-Year Backtest)
     is_elite = False
     mfi_slope_ok = False
@@ -243,16 +242,22 @@ async def receive_webhook(request: Request):
         if ctx.depth_0_5_delta_usd < -10000000: prob_score += 1; depth_check = "✅"
         if short_liqs > 500000 or (0 < ctx.price < ctx.session_poc_price): prob_score += 1; poc_liq_check = "✅"
 
-    # Final Verdict
+    # Final Verdict Logic (Institutional Grade)
+    mtf_aligned = align_3m and align_5m and align_15m
+    
     if is_elite:
-        verdict = "🎯 <b>SNIPER ELITE (57%+ Probabilidad)</b>"
-        prob_score = 9 # Override to max for elite
-    elif prob_score >= 6:
-        verdict = "🔥 <b>ALTA PROBABILIDAD</b> (Order Flow Confirmado)"
-    elif prob_score >= 4:
-        verdict = "⚠️ <b>PROBABILIDAD MEDIA</b> (Fuerzas Divididas)"
+        verdict = "🎯 <b>SNIPER ELITE (57%+ Prob)</b>"
+        prob_score = 10 
+    elif not align_15m:
+        # Penalización severa por ir contra el Macro Trend
+        verdict = "⚠️ <b>RIESGO DE TRAMPA (Contra-Tendencia 15m)</b>"
+        prob_score = min(prob_score, 5) # Cap at medium probability
+    elif mtf_aligned and prob_score >= 7:
+        verdict = "🔥 <b>ALTA PROBABILIDAD (Confirmado)</b>"
+    elif mtf_aligned or prob_score >= 5:
+        verdict = "⚖️ <b>PROBABILIDAD MEDIA (Fuerzas Divididas)</b>"
     else:
-        verdict = "❌ <b>BAJA PROBABILIDAD</b> (Order Flow en Contra)"
+        verdict = "❌ <b>BAJA PROBABILIDAD (Sin Confirmación)</b>"
     
     if not is_buy_signal and not is_sell_signal:
         verdict = "Señal Neutral"
@@ -277,8 +282,8 @@ async def receive_webhook(request: Request):
         f"├─ [{ms_15_check}] <b>Estructura 15m (Macro):</b> {msg_15m}\n"
         f"├─ [{ms_5_check}] <b>Estructura 5m (Principal):</b> {msg_5m}\n"
         f"├─ [{ms_3_check}] <b>Estructura 3m (Gatillo):</b> {msg_3m}\n"
+        f"├─ [{'✅' if loc_ok else '❌'}] <b>Zona W.T (Golden):</b> {wt1_5m:+.1f} ({'🎯' if loc_ok else 'Extrema/Media'}) \n"
         f"├─ [{mfi_check}] <b>MFI (Money Flow):</b> {mfi_msg}\n"
-        f"├─ <b>Ubicación W.T:</b> {wt1_5m:+.1f} ({'Golden Zone 🎯' if loc_ok else 'Extremo/Neutro'}) \n"
         f"├─ [{spot_check}] <b>CVD Spot:</b> ${ctx.spot_cvd:,.0f}\n"
         f"├─ [{fut_check}] <b>CVD Futuros:</b> ${ctx.futures_cvd:,.0f}\n"
         f"├─ [{oi_check}] <b>Delta OI (5m):</b> {oi_delta_pct:+.3f}%\n"
