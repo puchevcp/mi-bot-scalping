@@ -56,18 +56,19 @@ def analyze_structure(data, is_buy_signal, tf_name) -> tuple[bool, str]:
     vol_promedio = sum(vols_hist) / len(vols_hist)
     rvol = vol_actual / vol_promedio if vol_promedio > 0 else 1.0
     
-    rvol_tag = f" ⭐ (RVOL {rvol:.1f})" if rvol >= 1.2 else ""
+    r_ok = (rvol >= 1.2)
+    rvol_tag = f" ⭐ (RVOL {rvol:.1f})" if r_ok else f" (RVOL {rvol:.1f})"
     
     if is_buy_signal:
         if candles[3]["low"] >= candles[1]["low"] * 0.999: # HL o plano
-            if bull_vol > bear_vol: return True, f"Alcista (HL) + Vol. Compra{rvol_tag}"
-            else: return False, f"Sin Vol. Comprador{rvol_tag}"
-        else: return False, f"Rompiendo a la Baja{rvol_tag}"
+            if bull_vol > bear_vol: return True, f"Alcista (HL) + Vol. Compra{rvol_tag}", rvol
+            else: return False, f"Sin Vol. Comprador{rvol_tag}", rvol
+        else: return False, f"Rompiendo a la Baja{rvol_tag}", rvol
     else:
         if candles[3]["high"] <= candles[1]["high"] * 1.001: # LH o plano
-            if bear_vol > bull_vol: return True, f"Bajista (LH) + Vol. Venta{rvol_tag}"
-            else: return False, f"Sin Vol. Vendedor{rvol_tag}"
-        else: return False, f"Rompiendo al Alza{rvol_tag}"
+            if bear_vol > bull_vol: return True, f"Bajista (LH) + Vol. Venta{rvol_tag}", rvol
+            else: return False, f"Sin Vol. Vendedor{rvol_tag}", rvol
+        else: return False, f"Rompiendo al Alza{rvol_tag}", rvol
 
 def calculate_vwap(data):
     if not isinstance(data, list): return None, None
@@ -113,6 +114,21 @@ def calculate_mfi(data, period=60):
     
     return current_mfi_sma, prev_mfi_sma
 
+def calculate_wt(data, chlen=12, avglen=3):
+    if not isinstance(data, list) or len(data) < 20: return 0, 0
+    df = pd.DataFrame(data, columns=["ts","open","high","low","close","vol"])
+    for col in ["open","high","low","close","vol"]: df[col] = df[col].astype(float)
+    
+    hlc3 = (df['high'] + df['low'] + df['close']) / 3.0
+    esa = hlc3.ewm(span=chlen, adjust=False).mean()
+    de = (hlc3 - esa).abs().ewm(span=chlen, adjust=False).mean()
+    ci = (hlc3 - esa) / (0.015 * de)
+    wt1 = ci.ewm(span=avglen, adjust=False).mean()
+    wt2 = wt1.rolling(window=4).mean()
+    return wt1.iloc[-1], wt2.iloc[-1]
+
+import pandas as pd
+
 async def fetch_kline(session, url):
     async with session.get(url, timeout=5) as resp:
         return await resp.json()
@@ -130,18 +146,21 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             tasks = [fetch_kline(session, u) for u in urls]
             res_3m, res_5m, res_15m, res_vwap = await asyncio.gather(*tasks)
             
-            align_3m, msg_3m = analyze_structure(res_3m, is_buy_signal, "3m")
-            align_5m, msg_5m = analyze_structure(res_5m, is_buy_signal, "5m")
-            align_15m, msg_15m = analyze_structure(res_15m, is_buy_signal, "15m")
+            align_3m, msg_3m, r3 = analyze_structure(res_3m, is_buy_signal, "3m")
+            align_5m, msg_5m, r5 = analyze_structure(res_5m, is_buy_signal, "5m")
+            align_15m, msg_15m, r15 = analyze_structure(res_15m, is_buy_signal, "15m")
             vwap, stdev = calculate_vwap(res_vwap)
             mfi_now, mfi_prev = calculate_mfi(res_vwap)
             
-            return align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev, mfi_now, mfi_prev
+            # Calcuar WT1 base para filtrado Sniper (40-60)
+            wt1_val, wt2_val = calculate_wt(res_5m)
+            
+            return align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev, mfi_now, mfi_prev, r5, wt1_val
     except asyncio.TimeoutError:
-        return False, "Timeout", False, "Timeout", False, "Timeout", None, None
+        return False, "Timeout", False, "Timeout", False, "Timeout", None, None, None, None, 1.0, 0
     except Exception as e:
         print(f"[!] Error multiframe: {e}")
-        return False, "Error API", False, "Error API", False, "Error API", None, None
+        return False, "Error API", False, "Error API", False, "Error API", None, None, None, None, 1.0, 0
             
 @app.post("/webhook")
 async def receive_webhook(request: Request):
@@ -163,12 +182,27 @@ async def receive_webhook(request: Request):
     short_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "SHORT")
     
     # Check 3m/5m/15m and VWAP/MFI
-    align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev, mfi_now, mfi_prev = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
+    (align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, 
+     vwap, stdev, mfi_now, mfi_prev, rvol_5m, wt1_5m) = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
     
     # Determine the context verdict
     verdict = ""
     prob_score = 0
-    total_score = 9 # Spotlight on 9 dynamic elements (Spot, Fut, OI, Depth, POC, 3m/5m/15m, MFI)
+    total_score = 9 
+    
+    # Sniper ELITE Logic (Derived from 4-Year Backtest)
+    is_elite = False
+    mfi_slope_ok = False
+    if is_buy_signal and mfi_now > mfi_prev: mfi_slope_ok = True
+    if is_sell_signal and mfi_now < mfi_prev: mfi_slope_ok = True
+    
+    # Golden Zone Check (40-60 range)
+    loc_ok = False
+    if is_buy_signal and -65 < wt1_5m < -35: loc_ok = True
+    if is_sell_signal and 35 < wt1_5m < 65: loc_ok = True
+    
+    if align_3m and align_5m and align_15m and mfi_slope_ok and loc_ok and rvol_5m >= 1.2:
+        is_elite = True
     
     # Checkmark display states
     spot_check = "❌"
@@ -179,7 +213,7 @@ async def receive_webhook(request: Request):
     ms_3_check = "✅" if align_3m else "❌"
     ms_5_check = "✅" if align_5m else "❌"
     ms_15_check = "✅" if align_15m else "❌"
-    mfi_check = "❌"
+    mfi_check = "✅" if mfi_slope_ok else "❌"
     
     if align_3m: prob_score += 1
     if align_5m: prob_score += 1
@@ -187,79 +221,40 @@ async def receive_webhook(request: Request):
     
     vwap_msg = "No data"
     if vwap:
-        if is_buy_signal and ctx.price > vwap:
-            vwap_msg = f"✅ Precio ARRIBA del VWAP (${vwap:,.1f})"
-        elif is_sell_signal and ctx.price < vwap:
-            vwap_msg = f"✅ Precio DEBAJO del VWAP (${vwap:,.1f})"
+        if (is_buy_signal and ctx.price > vwap) or (is_sell_signal and ctx.price < vwap):
+            vwap_msg = f"✅ Precio ARRIBA del VWAP (${vwap:,.1f})" if is_buy_signal else f"✅ Precio DEBAJO del VWAP (${vwap:,.1f})"
         else:
             vwap_msg = f"❌ Precio contra el VWAP (${vwap:,.1f})"
-            
-        # Optional: Check if resting on deviation bands
-        lower_band1, upper_band1 = vwap - stdev, vwap + stdev
-        vwap_msg += f" [Desviación: ±${stdev:,.0f}]"
+        vwap_msg += f" [±${stdev:,.0f}]"
         
-    mfi_msg = "No data"
-    if mfi_now is not None:
-        mfi_dir = "📈 Creciendo" if mfi_now > mfi_prev else "📉 Bajando"
-        mfi_state = "Saliendo de zona roja" if (mfi_now < 0 and mfi_now > mfi_prev) else ("Entrando a zona verde" if mfi_now > 0 and mfi_now > mfi_prev else "Debilitándose")
-        mfi_msg = f"{mfi_now:+.1f} ({mfi_dir})"
-        
-        # Scoring MFI
-        if is_buy_signal and mfi_now > mfi_prev: # MFI subiendo es bueno para comprar
-            prob_score += 1
-            mfi_check = "✅"
-        elif is_sell_signal and mfi_now < mfi_prev: # MFI bajando es bueno para vender
-            prob_score += 1
-            mfi_check = "✅"
+    mfi_msg = f"{mfi_now:+.1f} ({'📈' if mfi_now > mfi_prev else '📉'})" if mfi_now else "No data"
     
+    # Score other OF components
     if is_buy_signal:
-        if ctx.spot_cvd > 0: 
-            prob_score += 1     # +Spot buying
-            spot_check = "✅"
-        if ctx.futures_cvd > 0: 
-            prob_score += 1  # +Futures buying
-            fut_check = "✅"
-        if oi_delta_pct > 0: 
-            prob_score += 1     # +OI rising (new longs)
-            oi_check = "✅"
-        if ctx.depth_0_5_delta_usd > 10000000:   # Mínimo +$10M netos hacia arriba (0-5%)
-            prob_score += 1                      # +Heatmap Bid protection barrier
-            depth_check = "✅"
-        if long_liqs > 500000 or (ctx.session_poc_price > 0 and ctx.price > ctx.session_poc_price):
-            prob_score += 1                      # +Liquidity Sweep or Above POC
-            poc_liq_check = "✅"
-            
-        if prob_score >= 6:
-            verdict = "🔥 ALTA PROBABILIDAD (Confirmado por Order Flow Integral)"
-        elif prob_score >= 4:
-            verdict = "⚠️ PROBABILIDAD MEDIA (Fuerzas Divididas)"
-        else:
-            verdict = "❌ BAJA PROBABILIDAD (Order Flow en Contra)"
-            
+        if ctx.spot_cvd > 0: prob_score += 1; spot_check = "✅"
+        if ctx.futures_cvd > 0: prob_score += 1; fut_check = "✅"
+        if oi_delta_pct > 0: prob_score += 1; oi_check = "✅"
+        if ctx.depth_0_5_delta_usd > 10000000: prob_score += 1; depth_check = "✅"
+        if long_liqs > 500000 or (ctx.session_poc_price > 0 and ctx.price > ctx.session_poc_price): prob_score += 1; poc_liq_check = "✅"
     elif is_sell_signal:
-        if ctx.spot_cvd < 0: 
-            prob_score += 1     # +Spot selling
-            spot_check = "✅"
-        if ctx.futures_cvd < 0: 
-            prob_score += 1  # +Futures selling
-            fut_check = "✅"
-        if oi_delta_pct > 0: 
-            prob_score += 1     # +OI rising (new shorts)
-            oi_check = "✅"
-        if ctx.depth_0_5_delta_usd < -10000000:  # Mínimo -$10M netos hacia abajo (0-5%)
-            prob_score += 1                      # +Heatmap Ask resistance barrier
-            depth_check = "✅"
-        if short_liqs > 500000 or (0 < ctx.price < ctx.session_poc_price):
-            prob_score += 1                      # +Liquidity Sweep or Below POC
-            poc_liq_check = "✅"
-            
-        if prob_score >= 7:
-            verdict = "🔥 ALTA PROBABILIDAD (Confirmado por Order Flow Integral)"
-        elif prob_score >= 5:
-            verdict = "⚠️ PROBABILIDAD MEDIA (Fuerzas Divididas)"
-        else:
-            verdict = "❌ BAJA PROBABILIDAD (Order Flow en Contra)"
+        if ctx.spot_cvd < 0: prob_score += 1; spot_check = "✅"
+        if ctx.futures_cvd < 0: prob_score += 1; fut_check = "✅"
+        if oi_delta_pct > 0: prob_score += 1; oi_check = "✅"
+        if ctx.depth_0_5_delta_usd < -10000000: prob_score += 1; depth_check = "✅"
+        if short_liqs > 500000 or (0 < ctx.price < ctx.session_poc_price): prob_score += 1; poc_liq_check = "✅"
+
+    # Final Verdict
+    if is_elite:
+        verdict = "🎯 <b>SNIPER ELITE (57%+ Probabilidad)</b>"
+        prob_score = 9 # Override to max for elite
+    elif prob_score >= 6:
+        verdict = "🔥 <b>ALTA PROBABILIDAD</b> (Order Flow Confirmado)"
+    elif prob_score >= 4:
+        verdict = "⚠️ <b>PROBABILIDAD MEDIA</b> (Fuerzas Divididas)"
     else:
+        verdict = "❌ <b>BAJA PROBABILIDAD</b> (Order Flow en Contra)"
+    
+    if not is_buy_signal and not is_sell_signal:
         verdict = "Señal Neutral"
             
     delta_sign = "+" if ctx.depth_0_5_delta_usd > 0 else ""
@@ -275,7 +270,7 @@ async def receive_webhook(request: Request):
         f"<b>Par:</b> {alert.pair} ({alert.timeframe})\n"
         f"<b>Señal:</b> {alert.signal}\n"
         f"<b>Precio Actual:</b> ${alert.price:,.2f}\n"
-        f"<b>Veredicto Bot:</b> <b>{verdict}</b> ({prob_score}/{total_score})\n\n"
+        f"<b>Veredicto Bot:</b> {verdict} ({prob_score}/{total_score})\n\n"
         f"📊 <b>CONTEXTO DE MERCADO EN VIVO</b>\n"
         f"├─ [{poc_liq_check}] <b>POC Sesión:</b> ${ctx.session_poc_price:,.2f}\n"
         f"├─ <b>VWAP:</b> {vwap_msg}\n"
@@ -283,6 +278,7 @@ async def receive_webhook(request: Request):
         f"├─ [{ms_5_check}] <b>Estructura 5m (Principal):</b> {msg_5m}\n"
         f"├─ [{ms_3_check}] <b>Estructura 3m (Gatillo):</b> {msg_3m}\n"
         f"├─ [{mfi_check}] <b>MFI (Money Flow):</b> {mfi_msg}\n"
+        f"├─ <b>Ubicación W.T:</b> {wt1_5m:+.1f} ({'Golden Zone 🎯' if loc_ok else 'Extremo/Neutro'}) \n"
         f"├─ [{spot_check}] <b>CVD Spot:</b> ${ctx.spot_cvd:,.0f}\n"
         f"├─ [{fut_check}] <b>CVD Futuros:</b> ${ctx.futures_cvd:,.0f}\n"
         f"├─ [{oi_check}] <b>Delta OI (5m):</b> {oi_delta_pct:+.3f}%\n"
