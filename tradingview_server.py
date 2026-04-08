@@ -144,16 +144,24 @@ async def fetch_kline(session, url):
 
 async def get_multiframe_context(symbol: str, is_buy_signal: bool):
     urls = [
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=3m&limit=100", # Mas velas para ATR
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=3m&limit=1000", # Mayor historico para EWMA (TradingView match)
         f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=20",
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=20",
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=288" # Dia entero
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=1000",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=288"
     ]
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
             tasks = [fetch_kline(session, u) for u in urls]
-            res_3m, res_5m, res_15m, res_vwap = await asyncio.gather(*tasks)
+            raw_3m, raw_5m, raw_15m, raw_vwap = await asyncio.gather(*tasks)
+            
+            # ELIMINAR LA ÚLTIMA VELA (ESTÁ EN FORMACIÓN):
+            # Las alertas de TradingView se ejecutan "Al Cierre" (On Bar Close).
+            # La última vela de Binance tiene literalmente segundos de vida (Volumen = 0), arruinando RVOL y WT.
+            res_3m = raw_3m[:-1] if raw_3m else []
+            res_5m = raw_5m[:-1] if raw_5m else []
+            res_15m = raw_15m[:-1] if raw_15m else []
+            res_vwap = raw_vwap[:-1] if raw_vwap else []
             
             align_3m, msg_3m, r3 = analyze_structure(res_3m, is_buy_signal, "3m")
             align_5m, msg_5m, r5 = analyze_structure(res_5m, is_buy_signal, "5m")
