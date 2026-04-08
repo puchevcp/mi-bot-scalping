@@ -204,8 +204,9 @@ async def receive_webhook(request: Request):
     # Platinum 3m Logic (Derived from Phase 12 Backtest)
     is_platinum = False
     mfi_slope_ok = False
-    if is_buy_signal and mfi_now > mfi_prev: mfi_slope_ok = True
-    if is_sell_signal and mfi_now < mfi_prev: mfi_slope_ok = True
+    if mfi_now is not None and mfi_prev is not None:
+        if is_buy_signal and mfi_now > mfi_prev: mfi_slope_ok = True
+        if is_sell_signal and mfi_now < mfi_prev: mfi_slope_ok = True
     
     # Golden Zone Check (3m base)
     loc_ok = False
