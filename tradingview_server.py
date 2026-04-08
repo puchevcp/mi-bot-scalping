@@ -157,17 +157,21 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             
             align_3m, msg_3m, r3 = analyze_structure(res_3m, is_buy_signal, "3m")
             align_5m, msg_5m, r5 = analyze_structure(res_5m, is_buy_signal, "5m")
-            align_15m, msg_15m, r15 = analyze_structure(res_15m, is_buy_signal, "15m")
+            
+            # El filtro MACRO verdadero (Platinum Backtest) es el WaveTrend de 15m, no la estructura corta.
+            wt1_15m, wt2_15m = calculate_wt(res_15m)
+            macro_aligned = False
+            if is_buy_signal and wt1_15m > wt2_15m: macro_aligned = True
+            if not is_buy_signal and wt1_15m < wt2_15m: macro_aligned = True
+            msg_15m = f"{'Alcista' if wt1_15m > wt2_15m else 'Bajista'} (WT: {wt1_15m:.1f} {'📈' if wt1_15m > wt2_15m else '📉'})"
+            
             vwap, stdev = calculate_vwap(res_vwap)
             mfi_now, mfi_prev = calculate_mfi(res_vwap)
             
-            # ATR de 3m para objetivos dinamicos
             atr_3m = calculate_atr(res_3m)
-            
-            # Calcuar WT1 base para filtrado Sniper (usando 3m ahora como base Platinum)
             wt1_val, wt2_val = calculate_wt(res_3m)
             
-            return align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev, mfi_now, mfi_prev, r3, wt1_val, atr_3m
+            return align_3m, msg_3m, align_5m, msg_5m, macro_aligned, msg_15m, vwap, stdev, mfi_now, mfi_prev, r3, wt1_val, atr_3m
     except asyncio.TimeoutError:
         return False, "Timeout", False, "Timeout", False, "Timeout", None, None, None, None, 1.0, 0, 0
     except Exception as e:
@@ -179,60 +183,49 @@ async def receive_webhook(request: Request):
     alert = TVAlert(**await request.json())
     print(f"\n[!] Webhook recibido: {alert.signal} en {alert.pair}")
     
-    # Analyze High-Probability Context
-    # Example logic for a "BUY" signal
     is_buy_signal = "COMPRA" in alert.signal.upper() or "BUY" in alert.signal.upper()
     is_sell_signal = "VENTA" in alert.signal.upper() or "SELL" in alert.signal.upper()
     
-    # Calculate OI delta
     oi_delta_pct = 0.0
     if ctx.oi_5m_ago > 0:
         oi_delta_pct = ((ctx.oi_current - ctx.oi_5m_ago) / ctx.oi_5m_ago) * 100
         
-    # Liquidations
     long_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "LONG")
     short_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "SHORT")
-       # Check 3m/5m/15m and VWAP/MFI
-    (align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, 
+
+    (align_3m, msg_3m, align_5m, msg_5m, macro_aligned, msg_15m, 
      vwap, stdev, mfi_now, mfi_prev, rvol_3m, wt1_3m, atr_3m) = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
     
-    # Determine the context verdict
     verdict = ""
     prob_score = 0
-    total_score = 10 
     
-    # Platinum 3m Logic (Derived from Phase 12 Backtest)
     is_platinum = False
     mfi_slope_ok = False
     if mfi_now is not None and mfi_prev is not None:
         if is_buy_signal and mfi_now > mfi_prev: mfi_slope_ok = True
         if is_sell_signal and mfi_now < mfi_prev: mfi_slope_ok = True
     
-    # Golden Zone Check (3m base)
     loc_ok = False
     if is_buy_signal and -65 < wt1_3m < -35: loc_ok = True
     if is_sell_signal and 35 < wt1_3m < 65: loc_ok = True
     
-    if align_3m and align_15m and mfi_slope_ok and loc_ok and rvol_3m >= 1.2:
+    if align_3m and macro_aligned and mfi_slope_ok and loc_ok and rvol_3m >= 1.2:
         is_platinum = True
     
-    # Calculate Dynamic ATR Targets (Percentage)
-    # TP1 (Safe) = 1.0x ATR | TP2 (Platinum) = 1.5x ATR | TP3 (Moon) = 2.0x ATR
     tp1_pct = (atr_3m / alert.price) * 100 if alert.price > 0 else 0
     tp2_pct = (1.5 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
     tp3_pct = (2.0 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
     
-    # Checkmark display states
     spot_check = "❌"
     fut_check = "❌"
     oi_check = "❌"
     ms_3_check = "✅" if align_3m else "❌"
-    ms_15_check = "✅" if align_15m else "❌"
+    ms_15_check = "✅" if macro_aligned else "❌"
     mfi_check = "✅" if mfi_slope_ok else "❌"
     
     if align_3m: prob_score += 1
     if align_5m: prob_score += 1
-    if align_15m: prob_score += 1
+    if macro_aligned: prob_score += 1
     
     vwap_msg = "No data"
     if vwap:
@@ -243,7 +236,6 @@ async def receive_webhook(request: Request):
         
     mfi_msg = f"{mfi_now:+.1f} ({'📈' if mfi_now > mfi_prev else '📉'})" if mfi_now else "No data"
     
-    # Score other OF components
     if is_buy_signal:
         if ctx.spot_cvd > 0: prob_score += 2; spot_check = "✅"
         if ctx.futures_cvd > 0: prob_score += 2; fut_check = "✅"
@@ -253,12 +245,11 @@ async def receive_webhook(request: Request):
         if ctx.futures_cvd < 0: prob_score += 2; fut_check = "✅"
         if oi_delta_pct > 0: prob_score += 1; oi_check = "✅"
 
-    # Verdict Logic
     if is_platinum:
         verdict = "💎 <b>SNIPER PLATINUM (63%+ Prob)</b>"
         prob_score = 10 
-    elif not align_15m:
-        verdict = "⚠️ <b>RIESGO DE TRAMPA (Contra 15m)</b>"
+    elif not macro_aligned:
+        verdict = "⚠️ <b>RIESGO DE TRAMPA (Contra WT 15m)</b>"
         prob_score = min(prob_score, 5)
     elif align_3m and prob_score >= 7:
         verdict = "🔥 <b>ALTA PROBABILIDAD (Confirmado)</b>"
