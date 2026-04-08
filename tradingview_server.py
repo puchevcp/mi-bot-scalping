@@ -125,7 +125,7 @@ def calculate_mfi(data, period=60):
 
 def calculate_wt(data, chlen=12, avglen=3):
     if not isinstance(data, list) or len(data) < 20: return 0, 0
-    df = pd.DataFrame(data, columns=["ts","open","high","low","close","vol"])
+    df = pd.DataFrame([row[:6] for row in data], columns=["ts","open","high","low","close","vol"])
     for col in ["open","high","low","close","vol"]: df[col] = df[col].astype(float)
     
     hlc3 = (df['high'] + df['low'] + df['close']) / 3.0
