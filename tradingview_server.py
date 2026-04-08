@@ -34,9 +34,9 @@ async def startup_event():
 import math
 from datetime import datetime, timezone
 
-def analyze_structure(data, is_buy_signal, tf_name) -> tuple[bool, str]:
+def analyze_structure(data, is_buy_signal, tf_name) -> tuple[bool, str, float]:
     if not isinstance(data, list) or len(data) < 11: 
-        return False, f"Pocos datos ({tf_name})"
+        return False, f"Pocos datos ({tf_name})", 1.0
         
     # Extraer ultimas 4 velas para la estructura
     struct_candles = data[-4:]
