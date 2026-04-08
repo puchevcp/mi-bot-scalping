@@ -97,6 +97,15 @@ def calculate_vwap(data):
     stdev = math.sqrt(sum(variances))
     return vwap, stdev
 
+def calculate_atr(data, period=14):
+    if not isinstance(data, list) or len(data) < period + 1: return 0
+    tr_list = []
+    for i in range(1, len(data)):
+        h, l, prev_c = float(data[i][2]), float(data[i][3]), float(data[i-1][4])
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        tr_list.append(tr)
+    return sum(tr_list[-period:]) / period
+
 def calculate_mfi(data, period=60):
     if not isinstance(data, list) or len(data) < period + 1: return None, None
     
@@ -135,9 +144,9 @@ async def fetch_kline(session, url):
 
 async def get_multiframe_context(symbol: str, is_buy_signal: bool):
     urls = [
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=3m&limit=15",
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=15",
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=15",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=3m&limit=100", # Mas velas para ATR
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=20",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=20",
         f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=288" # Dia entero
     ]
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -152,15 +161,18 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             vwap, stdev = calculate_vwap(res_vwap)
             mfi_now, mfi_prev = calculate_mfi(res_vwap)
             
-            # Calcuar WT1 base para filtrado Sniper (40-60)
-            wt1_val, wt2_val = calculate_wt(res_5m)
+            # ATR de 3m para objetivos dinamicos
+            atr_3m = calculate_atr(res_3m)
             
-            return align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev, mfi_now, mfi_prev, r5, wt1_val
+            # Calcuar WT1 base para filtrado Sniper (usando 3m ahora como base Platinum)
+            wt1_val, wt2_val = calculate_wt(res_3m)
+            
+            return align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, vwap, stdev, mfi_now, mfi_prev, r3, wt1_val, atr_3m
     except asyncio.TimeoutError:
-        return False, "Timeout", False, "Timeout", False, "Timeout", None, None, None, None, 1.0, 0
+        return False, "Timeout", False, "Timeout", False, "Timeout", None, None, None, None, 1.0, 0, 0
     except Exception as e:
         print(f"[!] Error multiframe: {e}")
-        return False, "Error API", False, "Error API", False, "Error API", None, None, None, None, 1.0, 0
+        return False, "Error API", False, "Error API", False, "Error API", None, None, None, None, 1.0, 0, 0
             
 @app.post("/webhook")
 async def receive_webhook(request: Request):
@@ -180,37 +192,40 @@ async def receive_webhook(request: Request):
     # Liquidations
     long_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "LONG")
     short_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "SHORT")
-    
-    # Check 3m/5m/15m and VWAP/MFI
+       # Check 3m/5m/15m and VWAP/MFI
     (align_3m, msg_3m, align_5m, msg_5m, align_15m, msg_15m, 
-     vwap, stdev, mfi_now, mfi_prev, rvol_5m, wt1_5m) = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
+     vwap, stdev, mfi_now, mfi_prev, rvol_3m, wt1_3m, atr_3m) = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
     
     # Determine the context verdict
     verdict = ""
     prob_score = 0
-    total_score = 10 # 3m, 5m, 15m, WT Zone, MFI, Spot, Fut, OI, Depth, POC/Liqs    
-    # Sniper ELITE Logic (Derived from 4-Year Backtest)
-    is_elite = False
+    total_score = 10 
+    
+    # Platinum 3m Logic (Derived from Phase 12 Backtest)
+    is_platinum = False
     mfi_slope_ok = False
     if is_buy_signal and mfi_now > mfi_prev: mfi_slope_ok = True
     if is_sell_signal and mfi_now < mfi_prev: mfi_slope_ok = True
     
-    # Golden Zone Check (40-60 range)
+    # Golden Zone Check (3m base)
     loc_ok = False
-    if is_buy_signal and -65 < wt1_5m < -35: loc_ok = True
-    if is_sell_signal and 35 < wt1_5m < 65: loc_ok = True
+    if is_buy_signal and -65 < wt1_3m < -35: loc_ok = True
+    if is_sell_signal and 35 < wt1_3m < 65: loc_ok = True
     
-    if align_3m and align_5m and align_15m and mfi_slope_ok and loc_ok and rvol_5m >= 1.2:
-        is_elite = True
+    if align_3m and align_15m and mfi_slope_ok and loc_ok and rvol_3m >= 1.2:
+        is_platinum = True
+    
+    # Calculate Dynamic ATR Targets (Percentage)
+    # TP1 (Safe) = 1.0x ATR | TP2 (Platinum) = 1.5x ATR | TP3 (Moon) = 2.0x ATR
+    tp1_pct = (atr_3m / alert.price) * 100 if alert.price > 0 else 0
+    tp2_pct = (1.5 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
+    tp3_pct = (2.0 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
     
     # Checkmark display states
     spot_check = "❌"
     fut_check = "❌"
     oi_check = "❌"
-    depth_check = "❌"
-    poc_liq_check = "❌"
     ms_3_check = "✅" if align_3m else "❌"
-    ms_5_check = "✅" if align_5m else "❌"
     ms_15_check = "✅" if align_15m else "❌"
     mfi_check = "✅" if mfi_slope_ok else "❌"
     
@@ -221,75 +236,58 @@ async def receive_webhook(request: Request):
     vwap_msg = "No data"
     if vwap:
         if (is_buy_signal and ctx.price > vwap) or (is_sell_signal and ctx.price < vwap):
-            vwap_msg = f"✅ Precio ARRIBA del VWAP (${vwap:,.1f})" if is_buy_signal else f"✅ Precio DEBAJO del VWAP (${vwap:,.1f})"
+            vwap_msg = f"✅ Precio ARRIBA del VWAP" if is_buy_signal else f"✅ Precio DEBAJO del VWAP"
         else:
-            vwap_msg = f"❌ Precio contra el VWAP (${vwap:,.1f})"
-        vwap_msg += f" [±${stdev:,.0f}]"
+            vwap_msg = f"❌ Precio contra el VWAP"
         
     mfi_msg = f"{mfi_now:+.1f} ({'📈' if mfi_now > mfi_prev else '📉'})" if mfi_now else "No data"
     
     # Score other OF components
     if is_buy_signal:
-        if ctx.spot_cvd > 0: prob_score += 1; spot_check = "✅"
-        if ctx.futures_cvd > 0: prob_score += 1; fut_check = "✅"
+        if ctx.spot_cvd > 0: prob_score += 2; spot_check = "✅"
+        if ctx.futures_cvd > 0: prob_score += 2; fut_check = "✅"
         if oi_delta_pct > 0: prob_score += 1; oi_check = "✅"
-        if ctx.depth_0_5_delta_usd > 10000000: prob_score += 1; depth_check = "✅"
-        if long_liqs > 500000 or (ctx.session_poc_price > 0 and ctx.price > ctx.session_poc_price): prob_score += 1; poc_liq_check = "✅"
     elif is_sell_signal:
-        if ctx.spot_cvd < 0: prob_score += 1; spot_check = "✅"
-        if ctx.futures_cvd < 0: prob_score += 1; fut_check = "✅"
+        if ctx.spot_cvd < 0: prob_score += 2; spot_check = "✅"
+        if ctx.futures_cvd < 0: prob_score += 2; fut_check = "✅"
         if oi_delta_pct > 0: prob_score += 1; oi_check = "✅"
-        if ctx.depth_0_5_delta_usd < -10000000: prob_score += 1; depth_check = "✅"
-        if short_liqs > 500000 or (0 < ctx.price < ctx.session_poc_price): prob_score += 1; poc_liq_check = "✅"
 
-    # Final Verdict Logic (Institutional Grade)
-    mtf_aligned = align_3m and align_5m and align_15m
-    
-    if is_elite:
-        verdict = "🎯 <b>SNIPER ELITE (57%+ Prob)</b>"
+    # Verdict Logic
+    if is_platinum:
+        verdict = "💎 <b>SNIPER PLATINUM (63%+ Prob)</b>"
         prob_score = 10 
     elif not align_15m:
-        # Penalización severa por ir contra el Macro Trend
-        verdict = "⚠️ <b>RIESGO DE TRAMPA (Contra-Tendencia 15m)</b>"
-        prob_score = min(prob_score, 5) # Cap at medium probability
-    elif mtf_aligned and prob_score >= 7:
+        verdict = "⚠️ <b>RIESGO DE TRAMPA (Contra 15m)</b>"
+        prob_score = min(prob_score, 5)
+    elif align_3m and prob_score >= 7:
         verdict = "🔥 <b>ALTA PROBABILIDAD (Confirmado)</b>"
-    elif mtf_aligned or prob_score >= 5:
-        verdict = "⚖️ <b>PROBABILIDAD MEDIA (Fuerzas Divididas)</b>"
     else:
-        verdict = "❌ <b>BAJA PROBABILIDAD (Sin Confirmación)</b>"
-    
-    if not is_buy_signal and not is_sell_signal:
-        verdict = "Señal Neutral"
+        verdict = "⚖️ <b>Buscando Confirmación</b>"
             
-    delta_sign = "+" if ctx.depth_0_5_delta_usd > 0 else ""
-    
     wall_str = "Ninguno"
     if ctx.heatmap_walls:
         best_wall = ctx.heatmap_walls[0]
-        wall_str = f"{best_wall[1]:.0f} BTC en ${best_wall[0]:,.0f} ({best_wall[2]})"
+        wall_str = f"{best_wall[1]:.0f} BTC en ${best_wall[0]:,.0f}"
             
-    # Always format the complete message so the user can make the final decision
+    # Message Construction
     alert_text = (
-        f"🚨 <b>SEÑAL TRADINGVIEW</b> 🚨\n\n"
-        f"<b>Par:</b> {alert.pair} ({alert.timeframe})\n"
-        f"<b>Señal:</b> {alert.signal}\n"
-        f"<b>Precio Actual:</b> ${alert.price:,.2f}\n"
-        f"<b>Veredicto Bot:</b> {verdict} ({prob_score}/{total_score})\n\n"
-        f"📊 <b>CONTEXTO DE MERCADO EN VIVO</b>\n"
-        f"├─ [{poc_liq_check}] <b>POC Sesión:</b> ${ctx.session_poc_price:,.2f}\n"
-        f"├─ <b>VWAP:</b> {vwap_msg}\n"
+        f"🚨 <b>SNIPER ELITE {alert.timeframe}</b> 🚨\n\n"
+        f"<b>Señal:</b> {alert.signal} (${alert.price:,.2f})\n"
+        f"<b>Veredicto:</b> {verdict} ({prob_score}/10)\n\n"
+        f"🎯 <b>OBJETIVOS SUGERIDOS (ATR Dynamic)</b>\n"
+        f"├─ 🟢 <b>TP 1 (Safe):</b> +{tp1_pct:.2f}% (${(alert.price * (1 + tp1_pct/100) if is_buy_signal else alert.price * (1 - tp1_pct/100)):,.1f})\n"
+        f"├─ 💎 <b>TP 2 (Platinum):</b> +{tp2_pct:.2f}% (${(alert.price * (1 + tp2_pct/100) if is_buy_signal else alert.price * (1 - tp2_pct/100)):,.1f})\n"
+        f"└─ 🚀 <b>TP 3 (Moon):</b> +{tp3_pct:.2f}% (${(alert.price * (1 + tp3_pct/100) if is_buy_signal else alert.price * (1 - tp3_pct/100)):,.1f})\n"
+        f"   <i>SL recomendado: -0.25% fijos.</i>\n\n"
+        f"📊 <b>ORDEN FLOW & ESTRUCTURA</b>\n"
         f"├─ [{ms_15_check}] <b>Estructura 15m (Macro):</b> {msg_15m}\n"
-        f"├─ [{ms_5_check}] <b>Estructura 5m (Principal):</b> {msg_5m}\n"
-        f"├─ [{ms_3_check}] <b>Estructura 3m (Gatillo):</b> {msg_3m}\n"
-        f"├─ [{'✅' if loc_ok else '❌'}] <b>Zona W.T (Golden):</b> {wt1_5m:+.1f} ({'🎯' if loc_ok else 'Extrema/Media'}) \n"
-        f"├─ [{mfi_check}] <b>MFI (Money Flow):</b> {mfi_msg}\n"
+        f"├─ [{ms_3_check}] <b>Estructura 3m (Principal):</b> {msg_3m}\n"
+        f"├─ [{'✅' if loc_ok else '❌'}] <b>Zona W.T (Golden):</b> {wt1_3m:+.1f}\n"
+        f"├─ [{mfi_check}] <b>MFI Flow:</b> {mfi_msg}\n"
         f"├─ [{spot_check}] <b>CVD Spot:</b> ${ctx.spot_cvd:,.0f}\n"
         f"├─ [{fut_check}] <b>CVD Futuros:</b> ${ctx.futures_cvd:,.0f}\n"
         f"├─ [{oi_check}] <b>Delta OI (5m):</b> {oi_delta_pct:+.3f}%\n"
-        f"├─ [{depth_check}] <b>Delta Profundidad (0-5%):</b> {delta_sign}${ctx.depth_0_5_delta_usd:,.0f}\n"
-        f"├─ <b>🐋 Muro Heatmap (>500):</b> {wall_str}\n"
-        f"└─ <b>Liqs Recientes:</b> L: ${long_liqs:,.0f} | S: ${short_liqs:,.0f}\n"
+        f"└─ <b>Muro Heatmap:</b> {wall_str}\n"
     )
     
     if alert.optional_msg:
@@ -300,7 +298,7 @@ async def receive_webhook(request: Request):
 
 @app.get("/")
 def read_root():
-    return {"status": "online", "service": "High-Probability Engine"}
+    return {"status": "online", "service": "Platinum Sniper Engine"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
