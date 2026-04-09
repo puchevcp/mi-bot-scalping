@@ -180,8 +180,11 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             # (Si el precio rompe arriba, no importa si el WT esta cruzando en el techo, es alcista).
             macro_aligned = pa_aligned or wt_aligned
             
-            status_pa = "Alcista" if pa_aligned else "Bajista"
-            status_wt = "Alcista" if wt_aligned else "Bajista"
+            # Detectamos la tendencia REAL (no la alineacion) para el mensaje:
+            # (Si el precio de ahora es mayor al de hace 5 velas (1h 15m), es Alcista)
+            raw_pa_bullish = float(res_15m[-1][4]) > float(res_15m[-5][4])
+            status_pa = "Alcista" if raw_pa_bullish else "Bajista"
+            status_wt = "Alcista" if wt1_15m > wt2_15m else "Bajista"
             msg_15m = f"Precio {status_pa} | WT {status_wt} ({wt1_15m:.1f})"
             
             vwap, stdev = calculate_vwap(res_vwap)
