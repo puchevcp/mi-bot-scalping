@@ -214,8 +214,8 @@ async def receive_webhook(request: Request):
         if is_sell_signal and mfi_now < mfi_prev: mfi_slope_ok = True
     
     loc_ok = False
-    if is_buy_signal and -65 < wt1_3m < -35: loc_ok = True
-    if is_sell_signal and 35 < wt1_3m < 65: loc_ok = True
+    if is_buy_signal and wt1_3m <= -35: loc_ok = True
+    if is_sell_signal and wt1_3m >= 35: loc_ok = True
     
     if align_3m and macro_aligned and mfi_slope_ok and loc_ok and rvol_3m >= 1.2:
         is_platinum = True
@@ -270,9 +270,10 @@ async def receive_webhook(request: Request):
         wall_str = f"{best_wall[1]:.0f} BTC en ${best_wall[0]:,.0f}"
             
     # Message Construction
+    sig_emoji = "🟢" if is_buy_signal else "🔴"
     alert_text = (
         f"🚨 <b>SNIPER ELITE {alert.timeframe}</b> 🚨\n\n"
-        f"<b>Señal:</b> {alert.signal} (${alert.price:,.2f})\n"
+        f"<b>Señal:</b> {sig_emoji} {alert.signal.upper()} (${alert.price:,.2f})\n"
         f"<b>Veredicto:</b> {verdict} ({prob_score}/10)\n\n"
         f"🎯 <b>OBJETIVOS SUGERIDOS (ATR Dynamic)</b>\n"
         f"├─ 🟢 <b>TP 1 (Safe):</b> +{tp1_pct:.2f}% (${(alert.price * (1 + tp1_pct/100) if is_buy_signal else alert.price * (1 - tp1_pct/100)):,.1f})\n"
