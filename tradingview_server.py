@@ -166,12 +166,23 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             align_3m, msg_3m, r3 = analyze_structure(res_3m, is_buy_signal, "3m")
             align_5m, msg_5m, r5 = analyze_structure(res_5m, is_buy_signal, "5m")
             
-            # El filtro MACRO verdadero (Platinum Backtest) es el WaveTrend de 15m, no la estructura corta.
+            # EL FILTRO MACRO HIBRIDO (WaveTrend + Price Action)
+            # Primero: ¿Como estan las velas?
+            pa_aligned, pa_msg, _ = analyze_structure(res_15m, is_buy_signal, "15m")
+            
+            # Segundo: ¿Como esta el WaveTrend?
             wt1_15m, wt2_15m = calculate_wt(res_15m)
-            macro_aligned = False
-            if is_buy_signal and wt1_15m > wt2_15m: macro_aligned = True
-            if not is_buy_signal and wt1_15m < wt2_15m: macro_aligned = True
-            msg_15m = f"{'Alcista' if wt1_15m > wt2_15m else 'Bajista'} (WT: {wt1_15m:.1f} {'📈' if wt1_15m > wt2_15m else '📉'})"
+            wt_aligned = False
+            if is_buy_signal and wt1_15m > wt2_15m: wt_aligned = True
+            if not is_buy_signal and wt1_15m < wt2_15m: wt_aligned = True
+            
+            # El veredicto Macro es Verdadero si CUALQUIERA de los dos es positivo.
+            # (Si el precio rompe arriba, no importa si el WT esta cruzando en el techo, es alcista).
+            macro_aligned = pa_aligned or wt_aligned
+            
+            status_pa = "Alcista" if pa_aligned else "Bajista"
+            status_wt = "Alcista" if wt_aligned else "Bajista"
+            msg_15m = f"Precio {status_pa} | WT {status_wt} ({wt1_15m:.1f})"
             
             vwap, stdev = calculate_vwap(res_vwap)
             mfi_now, mfi_prev = calculate_mfi(res_vwap)
