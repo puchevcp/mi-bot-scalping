@@ -185,7 +185,10 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             msg_15m = f"Precio {status_pa} | WT {status_wt} ({wt1_15m:.1f})"
             
             vwap, stdev = calculate_vwap(res_vwap)
-            mfi_now, mfi_prev = calculate_mfi(res_vwap)
+            
+            # MFI SINCRONIZADO AL GATILLO (3m):
+            # Cambiamos de res_vwap (5m) a res_3m para que coincida con el grafico de 3m del usuario.
+            mfi_now, mfi_prev = calculate_mfi(res_3m)
             
             atr_3m = calculate_atr(res_3m)
             wt1_val, wt2_val = calculate_wt(res_3m)
