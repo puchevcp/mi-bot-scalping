@@ -205,111 +205,129 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             
 @app.post("/webhook")
 async def receive_webhook(request: Request):
-    alert = TVAlert(**await request.json())
-    print(f"\n[!] Webhook recibido: {alert.signal} en {alert.pair}")
-    
-    is_buy_signal = "COMPRA" in alert.signal.upper() or "BUY" in alert.signal.upper()
-    is_sell_signal = "VENTA" in alert.signal.upper() or "SELL" in alert.signal.upper()
-    
-    oi_delta_pct = 0.0
-    if ctx.oi_5m_ago > 0:
-        oi_delta_pct = ((ctx.oi_current - ctx.oi_5m_ago) / ctx.oi_5m_ago) * 100
+    try:
+        data = await request.json()
+        alert = TVAlert(**data)
+        print(f"\n[!] Webhook recibido: {alert.signal} en {alert.pair}")
         
-    long_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "LONG")
-    short_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "SHORT")
+        is_buy_signal = "COMPRA" in alert.signal.upper() or "BUY" in alert.signal.upper()
+        is_sell_signal = "VENTA" in alert.signal.upper() or "SELL" in alert.signal.upper()
+        
+        # Extraer variables del contexto GLOBAL
+        cvd_spot = ctx.spot_cvd
+        cvd_fut = ctx.futures_cvd
+        oi_current = ctx.oi_current
+        oi_prev = ctx.oi_5m_ago
+        
+        oi_delta_5m = 0.0
+        if oi_prev > 0:
+            oi_delta_5m = ((oi_current - oi_prev) / oi_prev) * 100
+            
+        m_price = 0
+        m_vol = 0
+        if ctx.heatmap_walls:
+            m_price, m_vol = ctx.heatmap_walls[0]
 
-    (align_3m, msg_3m, align_5m, msg_5m, macro_aligned, msg_15m, 
-     vwap, stdev, mfi_now, mfi_prev, rvol_3m, wt1_3m, atr_3m) = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
-    
-    # --- SECCIÓN DE PROCESAMIENTO GENERAL ---
-    mfi_slope_ok = False
-    if mfi_now is not None and mfi_prev is not None:
-        if is_buy_signal and mfi_now > mfi_prev: mfi_slope_ok = True
-        if is_sell_signal and mfi_now < mfi_prev: mfi_slope_ok = True
-    
-    loc_ok = False
-    if is_buy_signal and wt1_3m <= -35: loc_ok = True
-    if is_sell_signal and wt1_3m >= 35: loc_ok = True
-    
-    is_platinum = False
-    if align_3m and macro_aligned and mfi_slope_ok and loc_ok and rvol_3m >= 1.2:
-        is_platinum = True
+        (align_3m, msg_3m, align_5m, msg_5m, macro_aligned, msg_15m, 
+         vwap, stdev, mfi_now, mfi_prev, rvol_3m, wt1_3m, atr_3m) = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
+        
+        # --- SECCIÓN DE PROCESAMIENTO GENERAL ---
+        mfi_slope_ok = False
+        if mfi_now is not None and mfi_prev is not None:
+            if is_buy_signal and mfi_now > mfi_prev: mfi_slope_ok = True
+            if is_sell_signal and mfi_now < mfi_prev: mfi_slope_ok = True
+        
+        loc_ok = False
+        if is_buy_signal and wt1_3m <= -35: loc_ok = True
+        if is_sell_signal and wt1_3m >= 35: loc_ok = True
+        
+        is_platinum = False
+        if align_3m and macro_aligned and mfi_slope_ok and loc_ok and rvol_3m >= 1.2:
+            is_platinum = True
 
-    # --- CÁLCULO DE OBJETIVOS (TP) ---
-    tp1_pct = (atr_3m / alert.price) * 100 if alert.price > 0 else 0
-    tp2_pct = (1.5 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
-    tp3_pct = (2.0 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
-    
-    tp1 = alert.price * (1 + tp1_pct/100) if is_buy_signal else alert.price * (1 - tp1_pct/100)
-    tp2 = alert.price * (1 + tp2_pct/100) if is_buy_signal else alert.price * (1 - tp2_pct/100)
-    tp3 = alert.price * (1 + tp3_pct/100) if is_buy_signal else alert.price * (1 - tp3_pct/100)
+        # --- CÁLCULO DE OBJETIVOS (TP) ---
+        tp1_pct = (atr_3m / alert.price) * 100 if alert.price > 0 else 0
+        tp2_pct = (1.5 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
+        tp3_pct = (2.0 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
+        
+        tp1 = alert.price * (1 + tp1_pct/100) if is_buy_signal else alert.price * (1 - tp1_pct/100)
+        tp2 = alert.price * (1 + tp2_pct/100) if is_buy_signal else alert.price * (1 - tp2_pct/100)
+        tp3 = alert.price * (1 + tp3_pct/100) if is_buy_signal else alert.price * (1 - tp3_pct/100)
 
-    # --- SISTEMA DE PUNTUACIÓN (SCORING) ---
-    ms15_pts = 1 if macro_aligned else 0
-    ms3_pts = 1 if align_3m else 0
-    mfi_pts = 2 if mfi_slope_ok else 0
-    loc_pts = 1 if loc_ok else 0
-    rvol_pts = 1 if rvol_3m >= 1.2 else 0
-    spot_pts = 2 if (abs(cvd_spot) > 1000000 and ((is_buy_signal and cvd_spot > 0) or (not is_buy_signal and cvd_spot < 0))) else 0
-    fut_pts = 2 if (abs(cvd_fut) > 5000000 and ((is_buy_signal and cvd_fut > 0) or (not is_buy_signal and cvd_fut < 0))) else 0
-    oi_pts = 1 if (abs(oi_delta_5m) > 0.03 and ((is_buy_signal and oi_delta_5m > 0) or (not is_buy_signal and oi_delta_5m < 0))) else 0
-    
-    total_score = ms15_pts + ms3_pts + mfi_pts + loc_pts + rvol_pts + spot_pts + fut_pts + oi_pts
-    if is_platinum: total_score = 10
-    
-    # Nombres de Veredicto segun Score
-    if total_score >= 10: ver_name = "💎 PLATINUM SNIPER"
-    elif total_score >= 7: ver_name = "🟢 ALTA PROBABILIDAD"
-    elif total_score >= 4: ver_name = "🟡 PROBABILIDAD MEDIA"
-    else: ver_name = "🔴 BAJA PROBABILIDAD"
-    
-    verdict = f"{ver_name} ({total_score}/11)"
-    if total_score < 4: 
-        verdict = f"⚠️ TRAMPA PROBABLE ({total_score}/11)"
+        # --- SISTEMA DE PUNTUACIÓN (SCORING) ---
+        ms15_pts = 1 if macro_aligned else 0
+        ms3_pts = 1 if align_3m else 0
+        mfi_pts = 2 if mfi_slope_ok else 0
+        loc_pts = 1 if loc_ok else 0
+        rvol_pts = 1 if rvol_3m >= 1.2 else 0
+        spot_pts = 2 if (abs(cvd_spot) > 1000000 and ((is_buy_signal and cvd_spot > 0) or (not is_buy_signal and cvd_spot < 0))) else 0
+        fut_pts = 2 if (abs(cvd_fut) > 5000000 and ((is_buy_signal and cvd_fut > 0) or (not is_buy_signal and cvd_fut < 0))) else 0
+        oi_pts = 1 if (abs(oi_delta_5m) > 0.03 and ((is_buy_signal and oi_delta_5m > 0) or (not is_buy_signal and oi_delta_5m < 0))) else 0
+        
+        total_score = ms15_pts + ms3_pts + mfi_pts + loc_pts + rvol_pts + spot_pts + fut_pts + oi_pts
+        
+        # Nombres de Veredicto segun Score
+        if is_platinum:
+            ver_name = "💎 PLATINUM SNIPER"
+            total_score = 11
+        elif total_score >= 8: ver_name = "🟢 ALTA PROBABILIDAD"
+        elif total_score >= 5: ver_name = "🟡 PROBABILIDAD MEDIA"
+        else: ver_name = "🔴 BAJA PROBABILIDAD"
+        
+        verdict = f"{ver_name} ({total_score}/11)"
+        if total_score < 4: 
+            verdict = f"⚠️ TRAMPA PROBABLE ({total_score}/11)"
 
-    # --- CONSTRUCCIÓN DE EMOJIS Y TEXTOS ---
-    spot_check = "✅" if spot_pts > 0 else "❌"
-    fut_check = "✅" if fut_pts > 0 else "❌"
-    oi_check = "✅" if oi_pts > 0 else "❌"
-    ms_3_check = "✅" if align_3m else "❌"
-    ms_15_check = "✅" if macro_aligned else "❌"
-    mfi_check = "✅" if mfi_slope_ok else "❌"
-    
-    spot_txt = "Alcista" if cvd_spot > 0 else "Bajista"
-    fut_txt = "Alcista" if cvd_fut > 0 else "Bajista"
-    oi_txt = "Alcista" if oi_delta_5m > 0 else "Bajista"
+        # --- CONSTRUCCIÓN DE EMOJIS Y TEXTOS ---
+        spot_check = "✅" if spot_pts > 0 else "❌"
+        fut_check = "✅" if fut_pts > 0 else "❌"
+        oi_check = "✅" if oi_pts > 0 else "❌"
+        ms_3_check = "✅" if align_3m else "❌"
+        ms_15_check = "✅" if macro_aligned else "❌"
+        mfi_check = "✅" if mfi_slope_ok else "❌"
+        
+        spot_txt = "Alcista" if cvd_spot > 0 else "Bajista"
+        fut_txt = "Alcista" if cvd_fut > 0 else "Bajista"
+        oi_txt = "Alcista" if oi_delta_5m > 0 else "Bajista"
 
-    vwap_msg = "No data"
-    if vwap:
-        if (is_buy_signal and alert.price > vwap) or (is_sell_signal and alert.price < vwap):
-            vwap_msg = f"✅ Precio ARRIBA del VWAP" if is_buy_signal else f"✅ Precio DEBAJO del VWAP"
-        else:
-            vwap_msg = f"❌ Precio contra el VWAP"
+        vwap_msg = "No data"
+        if vwap:
+            if (is_buy_signal and alert.price > vwap) or (is_sell_signal and alert.price < vwap):
+                vwap_msg = f"✅ Precio ARRIBA del VWAP" if is_buy_signal else f"✅ Precio DEBAJO del VWAP"
+            else:
+                vwap_msg = f"❌ Precio contra el VWAP"
 
-    # --- CONSTRUCCIÓN DEL MENSAJE TELEGRAM ---
-    msg_telegram = (
-        f"🚨 <b>SNIPER ELITE 3</b> 🚨\n\n"
-        f"Señal: {alert.emoji} {alert.action} - GATILLO MARKET CIPHER B (${alert.price:,.2f})\n"
-        f"Veredicto: <b>{verdict}</b>\n\n"
-        f"🎯 <b>OBJETIVOS SUGERIDOS (ATR Dynamic)</b>\n"
-        f"┣ 🟢 TP 1 (Safe): +{tp1_pct:.2f}% (${tp1:,.1f})\n"
-        f"┣ 💎 TP 2 (Platinum): +{tp2_pct:.2f}% (${tp2:,.1f})\n"
-        f"┗ 🚀 TP 3 (Moon): +{tp3_pct:.2f}% (${tp3:,.1f})\n"
-        f"<i>SL recomendado: -0.25% fijos.</i>\n\n"
-        f"📊 <b>ORDEN FLOW & ESTRUCTURA</b>\n"
-        f"┣ [{ms_15_check}] Estructura 15m (1pt): {msg_15m}\n"
-        f"┣ [{ms_3_check}] Estructura 3m (1pt): {msg_3m} (RVOL {rvol_3m:.1f})\n"
-        f"┣ [{mfi_check}] MFI Flow (2pts): {mfi_now:.1f} ({'📈' if mfi_slope_ok else '📉'})\n"
-        f"┣ [✅] Zona W.T (1pt): {wt1_3m:.1f}\n"
-        f"┣ [{spot_check}] CVD Spot (2pts): ${cvd_spot:,.0f} ({spot_txt})\n"
-        f"┣ [{fut_check}] CVD Futuros (2pts): ${cvd_fut:,.0f} ({fut_txt})\n"
-        f"┣ [{oi_check}] Delta OI (5m/1pt): {oi_delta_5m:+.3f}% ({oi_txt})\n"
-        f"┗ Muro Heatmap: {m_vol:,.0f} BTC en ${m_price:,.0f}\n\n"
-        f"<i>Nota: {vwap_msg}. Revisar <a href='https://aggr.trade/'>Aggr.trade</a>.</i>"
-    )
-    
-    asyncio.create_task(send_telegram_message(msg_telegram))
-    return {"status": "success", "verdict": verdict}
+        # --- CONSTRUCCIÓN DEL MENSAJE TELEGRAM ---
+        # Definir emojis para la señal
+        s_emoji = "🟢🟢" if is_buy_signal else "🔴🔴"
+        s_action = "COMPRA" if is_buy_signal else "VENTA"
+        
+        msg_telegram = (
+            f"🚨 <b>SNIPER ELITE 3</b> 🚨\n\n"
+            f"Señal: {s_emoji} {s_action} - GATILLO MARKET CIPHER B (${alert.price:,.2f})\n"
+            f"Veredicto: <b>{verdict}</b>\n\n"
+            f"🎯 <b>OBJETIVOS SUGERIDOS (ATR Dynamic)</b>\n"
+            f"┣ 🟢 TP 1 (Safe): +{tp1_pct:.2f}% (${tp1:,.1f})\n"
+            f"┣ 💎 TP 2 (Platinum): +{tp2_pct:.2f}% (${tp2:,.1f})\n"
+            f"┗ 🚀 TP 3 (Moon): +{tp3_pct:.2f}% (${tp3:,.1f})\n"
+            f"<i>SL recomendado: -0.25% fijos.</i>\n\n"
+            f"📊 <b>ORDEN FLOW & ESTRUCTURA</b>\n"
+            f"┣ [{ms_15_check}] Estructura 15m (1pt): {msg_15m}\n"
+            f"┣ [{ms_3_check}] Estructura 3m (1pt): {msg_3m} (RVOL {rvol_3m:.1f})\n"
+            f"┣ [{mfi_check}] MFI Flow (2pts): {mfi_now:.1f} ({'📈' if mfi_slope_ok else '📉'})\n"
+            f"┣ [✅] Zona W.T (1pt): {wt1_3m:.1f}\n"
+            f"┣ [{spot_check}] CVD Spot (2pts): ${cvd_spot:,.0f} ({spot_txt})\n"
+            f"┣ [{fut_check}] CVD Futuros (2pts): ${cvd_fut:,.0f} ({fut_txt})\n"
+            f"┣ [{oi_check}] Delta OI (5m/1pt): {oi_delta_5m:+.3f}% ({oi_txt})\n"
+            f"┗ Muro Heatmap: {m_vol:,.0f} BTC en ${m_price:,.0f}\n\n"
+            f"<i>Nota: {vwap_msg}. Revisar <a href='https://aggr.trade/'>Aggr.trade</a>.</i>"
+        )
+        
+        asyncio.create_task(send_telegram_message(msg_telegram))
+        return {"status": "success", "verdict": verdict}
+    except Exception as e:
+        print(f"[!] ERROR EN WEBHOOK: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/")
 def read_root():
