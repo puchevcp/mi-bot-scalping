@@ -156,13 +156,12 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             tasks = [fetch_kline(session, u) for u in urls]
             raw_3m, raw_5m, raw_15m, raw_vwap = await asyncio.gather(*tasks)
             
-            # ELIMINAR LA ÚLTIMA VELA (ESTÁ EN FORMACIÓN):
             # Las alertas de TradingView se ejecutan "Al Cierre" (On Bar Close).
-            # La última vela de Binance tiene literalmente segundos de vida (Volumen = 0), arruinando RVOL y WT.
-            res_3m = raw_3m[:-1] if raw_3m else []
-            res_5m = raw_5m[:-1] if raw_5m else []
-            res_15m = raw_15m[:-1] if raw_15m else []
-            res_vwap = raw_vwap[:-1] if raw_vwap else []
+            # Por lo tanto, la última vela de la API de Binance ya es la vela cerrada que disparó la señal.
+            res_3m = raw_3m
+            res_5m = raw_5m
+            res_15m = raw_15m
+            res_vwap = raw_vwap
             
             align_3m, msg_3m, r3 = analyze_structure(res_3m, is_buy_signal, "3m")
             align_5m, msg_5m, r5 = analyze_structure(res_5m, is_buy_signal, "5m")
@@ -288,6 +287,10 @@ async def receive_webhook(request: Request):
         ms_15_check = "✅" if macro_aligned else "❌"
         mfi_check = "✅" if mfi_slope_ok else "❌"
         
+        mfi_emoji = "➖"
+        if mfi_now is not None and mfi_prev is not None:
+            mfi_emoji = "📈" if mfi_now > mfi_prev else "📉"
+        
         spot_txt = "Alcista" if cvd_spot > 0 else "Bajista"
         fut_txt = "Alcista" if cvd_fut > 0 else "Bajista"
         oi_txt = "Alcista" if oi_delta_5m > 0 else "Bajista"
@@ -316,7 +319,7 @@ async def receive_webhook(request: Request):
             f"📊 <b>ORDEN FLOW & ESTRUCTURA</b>\n"
             f"┣ [{ms_15_check}] Estructura 15m (1pt): {msg_15m}\n"
             f"┣ [{ms_3_check}] Estructura 3m (1pt): {msg_3m} (RVOL {rvol_3m:.1f})\n"
-            f"┣ [{mfi_check}] MFI Flow (2pts): {mfi_now:.1f} ({'📈' if mfi_slope_ok else '📉'})\n"
+            f"┣ [{mfi_check}] MFI Flow (2pts): {mfi_now:.1f} ({mfi_emoji})\n"
             f"┣ [✅] Zona W.T (1pt): {wt1_3m:.1f}\n"
             f"┣ [{spot_check}] CVD Spot (2pts): ${cvd_spot:,.0f} ({spot_txt})\n"
             f"┣ [{fut_check}] CVD Futuros (2pts): ${cvd_fut:,.0f} ({fut_txt})\n"
@@ -331,8 +334,8 @@ async def receive_webhook(request: Request):
         print(f"[!] ERROR EN WEBHOOK: {e}")
         return {"status": "error", "message": str(e)}
 
-@app.get("/")
-def read_root():
+@app.api_route("/", methods=["GET", "HEAD"])
+async def health_check():
     return {"status": "online", "service": "Platinum Sniper Engine"}
 
 if __name__ == "__main__":
