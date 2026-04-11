@@ -5,6 +5,7 @@ from typing import Optional
 from telegram_notifier import send_telegram_message
 import asyncio
 import aiohttp
+import os
 
 # Import the existing variables and start functions from our data engine
 from binance_data import (
@@ -226,7 +227,8 @@ async def receive_webhook(request: Request):
         m_price = 0
         m_vol = 0
         if ctx.heatmap_walls:
-            m_price, m_vol = ctx.heatmap_walls[0]
+            # Heatmap walls son una tupla de (price, qty, type)
+            m_price, m_vol, _ = ctx.heatmap_walls[0]
 
         (align_3m, msg_3m, align_5m, msg_5m, macro_aligned, msg_15m, 
          vwap, stdev, mfi_now, mfi_prev, rvol_3m, wt1_3m, atr_3m) = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
@@ -334,4 +336,10 @@ def read_root():
     return {"status": "online", "service": "Platinum Sniper Engine"}
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import platform
+    if platform.system() == 'Windows':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    # Render asigna un puerto dinámico mediante la variable de entorno 'PORT'
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
