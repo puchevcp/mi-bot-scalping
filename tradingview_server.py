@@ -6,6 +6,8 @@ from telegram_notifier import send_telegram_message
 import asyncio
 import aiohttp
 import os
+from datetime import datetime
+from journal_manager import log_signal, simulate_trade
 
 # Import the existing variables and start functions from our data engine
 from binance_data import (
@@ -328,6 +330,42 @@ async def receive_webhook(request: Request):
             f"<i>Nota: {vwap_msg}. Revisar <a href='https://aggr.trade/'>Aggr.trade</a>.</i>"
         )
         
+        # --- NUEVA SECCIÓN: BITÁCORA Y SIMULACIÓN ---
+        timestamp_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sl_val = alert.price * (1 - 0.0025) if is_buy_signal else alert.price * (1 + 0.0025)
+        
+        journal_entry = {
+            "Timestamp": timestamp_id,
+            "Signal": alert.signal,
+            "Pair": alert.pair,
+            "Price": alert.price,
+            "Verdict": ver_name,
+            "Score": f"{total_score}/11",
+            "MFI": mfi_now,
+            "CVD_Spot": cvd_spot,
+            "CVD_Fut": cvd_fut,
+            "OI_Delta": f"{oi_delta_5m:+.4f}%",
+            "RVOL": rvol_3m,
+            "WT_Zone": wt1_3m,
+            "TP1": tp1,
+            "TP2": tp2,
+            "TP3": tp3,
+            "SL": sl_val,
+            "Result": "OPEN",
+            "Close_Price": 0,
+            "Exit_Time": ""
+        }
+        
+        try:
+            log_signal(journal_entry)
+            # Iniciar monitoreo en segundo plano para ver si toca TP o SL
+            asyncio.create_task(simulate_trade(
+                timestamp_id, alert.pair, alert.price, 
+                tp1, tp2, tp3, sl_val, is_buy_signal
+            ))
+        except Exception as logger_err:
+            print(f"[!] Error al loguear/simular: {logger_err}")
+
         asyncio.create_task(send_telegram_message(msg_telegram))
         return {"status": "success", "verdict": verdict}
     except Exception as e:
