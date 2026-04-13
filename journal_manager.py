@@ -7,11 +7,12 @@ from datetime import datetime
 JOURNAL_FILE = "trades_journal.csv"
 GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbzPR9Yzs-3hMET2rLGd9P5QEi2jONQVlHfsvltAUxNgIMtRwfcGOESXQnuD6x3fib07Rw/exec"
 
-# Columnas de la Bitácora
+# Columnas de la Bitácora (Orden Forense)
 COLUMNS = [
     "Timestamp", "Signal", "Pair", "Price", "Verdict", "Score",
-    "MFI", "CVD_Spot", "CVD_Fut", "OI_Delta", "RVOL", "WT_Zone",
-    "TP1", "TP2", "TP3", "SL", "Result", "Close_Price", "Exit_Time"
+    "MFI_Val", "CVD_Spot", "CVD_Fut", "OI_Delta", "RVOL", "WT_Zone",
+    "Structure_15m", "Structure_3m", "TP1", "TP2", "TP3", "SL",
+    "Result", "Close_Price", "Exit_Time"
 ]
 
 def init_journal():
