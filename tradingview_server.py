@@ -248,10 +248,10 @@ async def receive_webhook(request: Request):
         if align_3m and macro_aligned and mfi_slope_ok and loc_ok and rvol_3m >= 1.2:
             is_platinum = True
 
-        # --- CÁLCULO DE OBJETIVOS (TP) ---
-        tp1_pct = (atr_3m / alert.price) * 100 if alert.price > 0 else 0
-        tp2_pct = (1.5 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
-        tp3_pct = (2.0 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
+        # --- CÁLCULO DE OBJETIVOS (TP) --- (Calibrados a 0.30% y 0.50%)
+        tp1_pct = (1.5 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
+        tp2_pct = (2.8 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
+        tp3_pct = (4.6 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
         
         tp1 = alert.price * (1 + tp1_pct/100) if is_buy_signal else alert.price * (1 - tp1_pct/100)
         tp2 = alert.price * (1 + tp2_pct/100) if is_buy_signal else alert.price * (1 - tp2_pct/100)

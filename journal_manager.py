@@ -70,26 +70,34 @@ async def simulate_trade(signal_id, pair, entry_price, tp1, tp2, tp3, sl, is_buy
             
             # Verificar Stop Loss
             if is_buy and curr_price <= sl:
-                update_journal_result(signal_id, "STOP LOSS (LOSS)", curr_price)
+                res_sl = "STOP LOSS (LOSS)" if sl != entry_price else "TP1 SECURED (BE/WIN)"
+                update_journal_result(signal_id, res_sl, curr_price)
                 break
             if not is_buy and curr_price >= sl:
-                update_journal_result(signal_id, "STOP LOSS (LOSS)", curr_price)
+                res_sl = "STOP LOSS (LOSS)" if sl != entry_price else "TP1 SECURED (BE/WIN)"
+                update_journal_result(signal_id, res_sl, curr_price)
                 break
                 
-            # Verificar Take Profits
-            if is_buy and curr_price >= tp1:
-                res_txt = "TP1 HIT (WIN)"
-                if curr_price >= tp2: res_txt = "TP2 HIT (WIN)"
+            # Verificar Take Profits (Aiming for TP2 Platinum)
+            if is_buy and curr_price >= tp2:
+                res_txt = "TP2 HIT (WIN)"
                 if curr_price >= tp3: res_txt = "TP3 HIT (WIN)"
                 update_journal_result(signal_id, res_txt, curr_price)
                 break
-            
-            if not is_buy and curr_price <= tp1:
-                res_txt = "TP1 HIT (WIN)"
-                if curr_price <= tp2: res_txt = "TP2 HIT (WIN)"
+            elif is_buy and curr_price >= tp1:
+                # Si toca TP1, aseguramos y seguimos hacia TP2
+                if sl != entry_price:
+                    sl = entry_price # Movemos SL a entrada (Break Even)
+                
+            if not is_buy and curr_price <= tp2:
+                res_txt = "TP2 HIT (WIN)"
                 if curr_price <= tp3: res_txt = "TP3 HIT (WIN)"
                 update_journal_result(signal_id, res_txt, curr_price)
                 break
+            elif not is_buy and curr_price <= tp1:
+                # Si toca TP1, aseguramos y seguimos hacia TP2
+                if sl != entry_price:
+                    sl = entry_price # Movemos SL a entrada (Break Even)
             
             # Timeout (Cerrar por tiempo)
             elapsed = (get_now_utc3() - start_time).total_seconds() / 3600
