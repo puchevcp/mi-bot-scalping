@@ -2,7 +2,7 @@ import csv
 import os
 import asyncio
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 JOURNAL_FILE = "trades_journal.csv"
 GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbzIpTKYgYVZtKYsjDRnMpwuUF2S-RhZh0KR3lQQe3oNqtpvZ6-ga5vmMd4s6g409NytqA/exec"
@@ -14,6 +14,10 @@ COLUMNS = [
     "Structure_15m", "Structure_3m", "TP1", "TP2", "TP3", "SL",
     "Result", "Close_Price", "Exit_Time"
 ]
+
+def get_now_utc3():
+    """Retorna la fecha y hora actual en formato UTC-3 (Argentina/Chile/etc)."""
+    return datetime.now(timezone(timedelta(hours=-3)))
 
 def init_journal():
     if not os.path.exists(JOURNAL_FILE):
@@ -47,17 +51,18 @@ async def sync_to_sheets(data):
 async def simulate_trade(signal_id, pair, entry_price, tp1, tp2, tp3, sl, is_buy):
     """
     Simula el resultado del trade monitoreando el precio en tiempo real.
-    signal_id: Puede ser el timestamp o un ID único para identificar la fila en el CSV.
+    signal_id: El timestamp usado como clave primaria.
     """
     print(f"[*] Iniciando Simulación para {pair} en ${entry_price:,.2f}...")
     
-    start_time = datetime.now()
+    start_time = get_now_utc3()
     max_duration_hours = 4 # Tiempo máximo de espera
     
     while True:
         try:
             # Obtener precio actual de Binance
-            url = f"https://api.binance.com/api/v3/ticker/price?symbol={pair.replace('.P', '')}"
+            symbol = pair.replace('.P', '')
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as response:
                     res_data = await response.json()
@@ -72,7 +77,6 @@ async def simulate_trade(signal_id, pair, entry_price, tp1, tp2, tp3, sl, is_buy
                 break
                 
             # Verificar Take Profits
-            # Para la bitácora, marcaremos como WIN si toca al menos el TP1
             if is_buy and curr_price >= tp1:
                 res_txt = "TP1 HIT (WIN)"
                 if curr_price >= tp2: res_txt = "TP2 HIT (WIN)"
@@ -88,7 +92,7 @@ async def simulate_trade(signal_id, pair, entry_price, tp1, tp2, tp3, sl, is_buy
                 break
             
             # Timeout (Cerrar por tiempo)
-            elapsed = (datetime.now() - start_time).total_seconds() / 3600
+            elapsed = (get_now_utc3() - start_time).total_seconds() / 3600
             if elapsed >= max_duration_hours:
                 update_journal_result(signal_id, "TIMEOUT (EXIT)", curr_price)
                 break
@@ -111,7 +115,7 @@ def update_journal_result(timestamp_id, result_text, close_price):
             if row['Timestamp'] == timestamp_id:
                 row['Result'] = result_text
                 row['Close_Price'] = f"{close_price:,.2f}"
-                row['Exit_Time'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                row['Exit_Time'] = get_now_utc3().strftime("%Y-%m-%d %H:%M:%S")
                 updated = True
             rows.append(row)
             
@@ -124,7 +128,16 @@ def update_journal_result(timestamp_id, result_text, close_price):
         # Sincronizar actualización con la nube
         for r in rows:
             if r['Timestamp'] == timestamp_id:
-                asyncio.create_task(sync_to_sheets(r))
+                # Necesitamos un loop de eventos para create_task si no estamos en uno
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(sync_to_sheets(r))
+                    else:
+                        loop.run_until_complete(sync_to_sheets(r))
+                except:
+                    # Fallback simple
+                    asyncio.run(sync_to_sheets(r))
                 break
                 
         print(f"[✓] Bitácora Actualizada: {timestamp_id} -> {result_text}")

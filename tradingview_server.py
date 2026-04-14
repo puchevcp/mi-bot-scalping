@@ -7,7 +7,7 @@ import asyncio
 import aiohttp
 import os
 from datetime import datetime
-from journal_manager import log_signal, simulate_trade
+from journal_manager import log_signal, simulate_trade, get_now_utc3
 
 # Import the existing variables and start functions from our data engine
 from binance_data import (
@@ -331,7 +331,7 @@ async def receive_webhook(request: Request):
         )
         
         # --- NUEVA SECCIÓN: BITÁCORA Y SIMULACIÓN ---
-        timestamp_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp_id = get_now_utc3().strftime("%Y-%m-%d %H:%M:%S")
         sl_val = alert.price * (1 - 0.0025) if is_buy_signal else alert.price * (1 + 0.0025)
         
         journal_entry = {
