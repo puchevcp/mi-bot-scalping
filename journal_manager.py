@@ -5,7 +5,7 @@ import aiohttp
 from datetime import datetime, timedelta, timezone
 
 JOURNAL_FILE = "trades_journal.csv"
-GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbzIpTKYgYVZtKYsjDRnMpwuUF2S-RhZh0KR3lQQe3oNqtpvZ6-ga5vmMd4s6g409NytqA/exec"
+GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbw_1zvhAxMoY_sXoADUi8BYsAxIfxZCA_eP08BXk5S_NFxQAyDLLrbfLhB38ux2E8ku/exec"
 
 # Columnas de la Bitácora (Orden Forense)
 COLUMNS = [
