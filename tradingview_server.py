@@ -244,14 +244,16 @@ async def receive_webhook(request: Request):
         if is_buy_signal and wt1_3m <= -35: loc_ok = True
         if is_sell_signal and wt1_3m >= 35: loc_ok = True
         
+        # --- CONDICIÓN PLATINUM (ELITE) ---
+        # Ahora requiere CVD Futuros masivo (>30M) para ser considerado Platinum
         is_platinum = False
-        if align_3m and macro_aligned and mfi_slope_ok and loc_ok and rvol_3m >= 1.2:
+        cvd_fut_elite = abs(cvd_fut) > 30000000
+        if align_3m and macro_aligned and mfi_slope_ok and loc_ok and rvol_3m >= 1.2 and cvd_fut_elite:
             is_platinum = True
 
-        # --- CÁLCULO DE OBJETIVOS (TP) --- (Calibrados a 0.30% y 0.50%)
         tp1_pct = (1.5 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
         tp2_pct = (2.8 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
-        tp3_pct = (4.6 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
+        tp3_pct = (3.8 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
         
         tp1 = alert.price * (1 + tp1_pct/100) if is_buy_signal else alert.price * (1 - tp1_pct/100)
         tp2 = alert.price * (1 + tp2_pct/100) if is_buy_signal else alert.price * (1 - tp2_pct/100)
@@ -267,19 +269,28 @@ async def receive_webhook(request: Request):
         fut_pts = 2 if (abs(cvd_fut) > 5000000 and ((is_buy_signal and cvd_fut > 0) or (not is_buy_signal and cvd_fut < 0))) else 0
         oi_pts = 1 if (abs(oi_delta_5m) > 0.03 and ((is_buy_signal and oi_delta_5m > 0) or (not is_buy_signal and oi_delta_5m < 0))) else 0
         
-        total_score = ms15_pts + ms3_pts + mfi_pts + loc_pts + rvol_pts + spot_pts + fut_pts + oi_pts
+        # Bono Institucional: +2 puntos si hay presion masiva (>50M)
+        inst_bonus = 2 if abs(cvd_fut) > 50000000 else 0
+        
+        total_score = ms15_pts + ms3_pts + mfi_pts + loc_pts + rvol_pts + spot_pts + fut_pts + oi_pts + inst_bonus
         
         # Nombres de Veredicto segun Score
         if is_platinum:
             ver_name = "💎 PLATINUM SNIPER"
-            total_score = 11
+            total_score = max(total_score, 11)
         elif total_score >= 8: ver_name = "🟢 ALTA PROBABILIDAD"
-        elif total_score >= 5: ver_name = "🟡 PROBABILIDAD MEDIA"
+        elif total_score >= 5: 
+            # Restriccion de SHORTs en Probabilidad Media (Audit: 31.8% WR)
+            if is_sell_signal and cvd_fut > 0:
+                ver_name = "🔴 BAJA (SHORT CONTRA-TREND)"
+                total_score = 4
+            else:
+                ver_name = "🟡 PROBABILIDAD MEDIA"
         else: ver_name = "🔴 BAJA PROBABILIDAD"
         
-        verdict = f"{ver_name} ({total_score}/11)"
-        if total_score < 4: 
-            verdict = f"⚠️ TRAMPA PROBABLE ({total_score}/11)"
+        verdict = f"{ver_name} ({total_score}/13)" # Aumentamos base a 13 por el bono
+        if total_score < 4 and not is_platinum: 
+            verdict = f"⚠️ TRAMPA PROBABLE ({total_score}/13)"
 
         # --- CONSTRUCCIÓN DE EMOJIS Y TEXTOS ---
         spot_check = "✅" if spot_pts > 0 else "❌"
