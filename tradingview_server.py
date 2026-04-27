@@ -8,6 +8,7 @@ import aiohttp
 import os
 from datetime import datetime
 from journal_manager import log_signal, simulate_trade, get_now_utc3
+import binance_executor
 
 # Import the existing variables and start functions from our data engine
 from binance_data import (
@@ -147,58 +148,49 @@ async def fetch_kline(session, url):
 
 async def get_multiframe_context(symbol: str, is_buy_signal: bool):
     urls = [
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=3m&limit=1000", # Mayor historico para EWMA (TradingView match)
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=1000", # Primario (15m)
         f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=20",
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=1000",
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=288"
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=1000",   # Macro (1h)
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=288" # VWAP (24h de 15m)
     ]
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
             tasks = [fetch_kline(session, u) for u in urls]
-            raw_3m, raw_5m, raw_15m, raw_vwap = await asyncio.gather(*tasks)
+            raw_15m, raw_5m, raw_1h, raw_vwap = await asyncio.gather(*tasks)
             
-            # Las alertas de TradingView se ejecutan "Al Cierre" (On Bar Close).
-            # Por lo tanto, la última vela de la API de Binance ya es la vela cerrada que disparó la señal.
-            res_3m = raw_3m
-            res_5m = raw_5m
             res_15m = raw_15m
+            res_5m = raw_5m
+            res_1h = raw_1h
             res_vwap = raw_vwap
             
-            align_3m, msg_3m, r3 = analyze_structure(res_3m, is_buy_signal, "3m")
-            align_5m, msg_5m, r5 = analyze_structure(res_5m, is_buy_signal, "5m")
+            align_15m, msg_15m, r15 = analyze_structure(res_15m, is_buy_signal, "15m")
             
-            # EL FILTRO MACRO HIBRIDO (WaveTrend + Price Action)
-            # Primero: ¿Como estan las velas?
-            pa_aligned, pa_msg, _ = analyze_structure(res_15m, is_buy_signal, "15m")
+            # EL FILTRO MACRO (1h HIBRIDO: WaveTrend + Price Action)
+            pa_aligned, pa_msg, _ = analyze_structure(res_1h, is_buy_signal, "1h")
             
-            # Segundo: ¿Como esta el WaveTrend?
-            wt1_15m, wt2_15m = calculate_wt(res_15m)
+            wt1_1h, wt2_1h = calculate_wt(res_1h)
             wt_aligned = False
-            if is_buy_signal and wt1_15m > wt2_15m: wt_aligned = True
-            if not is_buy_signal and wt1_15m < wt2_15m: wt_aligned = True
+            if is_buy_signal and wt1_1h > wt2_1h: wt_aligned = True
+            if not is_buy_signal and wt1_1h < wt2_1h: wt_aligned = True
             
-            # El veredicto Macro es Verdadero si CUALQUIERA de los dos es positivo.
-            # (Si el precio rompe arriba, no importa si el WT esta cruzando en el techo, es alcista).
             macro_aligned = pa_aligned or wt_aligned
             
             # Detectamos la tendencia REAL (no la alineacion) para el mensaje:
-            # (Si el precio de ahora es mayor al de hace 5 velas (1h 15m), es Alcista)
-            raw_pa_bullish = float(res_15m[-1][4]) > float(res_15m[-5][4])
+            raw_pa_bullish = float(res_1h[-1][4]) > float(res_1h[-5][4])
             status_pa = "Alcista" if raw_pa_bullish else "Bajista"
-            status_wt = "Alcista" if wt1_15m > wt2_15m else "Bajista"
-            msg_15m = f"Precio {status_pa} | WT {status_wt} ({wt1_15m:.1f})"
+            status_wt = "Alcista" if wt1_1h > wt2_1h else "Bajista"
+            msg_1h = f"Precio {status_pa} | WT {status_wt} ({wt1_1h:.1f})"
             
             vwap, stdev = calculate_vwap(res_vwap)
             
-            # MFI SINCRONIZADO AL GATILLO (3m):
-            # Cambiamos de res_vwap (5m) a res_3m para que coincida con el grafico de 3m del usuario.
-            mfi_now, mfi_prev = calculate_mfi(res_3m)
+            # MFI SINCRONIZADO AL GATILLO (15m):
+            mfi_now, mfi_prev = calculate_mfi(res_15m)
             
-            atr_3m = calculate_atr(res_3m)
-            wt1_val, wt2_val = calculate_wt(res_3m)
+            atr_15m = calculate_atr(res_15m)
+            wt1_val, wt2_val = calculate_wt(res_15m)
             
-            return align_3m, msg_3m, align_5m, msg_5m, macro_aligned, msg_15m, vwap, stdev, mfi_now, mfi_prev, r3, wt1_val, atr_3m
+            return align_15m, msg_15m, macro_aligned, msg_1h, vwap, stdev, mfi_now, mfi_prev, r15, wt1_val, atr_15m
     except asyncio.TimeoutError:
         return False, "Timeout", False, "Timeout", False, "Timeout", None, None, None, None, 1.0, 0, 0
     except Exception as e:
@@ -231,8 +223,8 @@ async def receive_webhook(request: Request):
             # Heatmap walls son una tupla de (price, qty, type)
             m_price, m_vol, _ = ctx.heatmap_walls[0]
 
-        (align_3m, msg_3m, align_5m, msg_5m, macro_aligned, msg_15m, 
-         vwap, stdev, mfi_now, mfi_prev, rvol_3m, wt1_3m, atr_3m) = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
+        (align_15m, msg_15m, macro_aligned, msg_1h, 
+         vwap, stdev, mfi_now, mfi_prev, rvol_15m, wt1_15m, atr_15m) = await get_multiframe_context(SYMBOL.upper(), is_buy_signal)
         
         # --- SECCIÓN DE PROCESAMIENTO GENERAL ---
         mfi_slope_ok = False
@@ -241,30 +233,35 @@ async def receive_webhook(request: Request):
             if is_sell_signal and mfi_now < mfi_prev: mfi_slope_ok = True
         
         loc_ok = False
-        if is_buy_signal and wt1_3m <= -35: loc_ok = True
-        if is_sell_signal and wt1_3m >= 35: loc_ok = True
+        if is_buy_signal and wt1_15m <= -35: loc_ok = True
+        if is_sell_signal and wt1_15m >= 35: loc_ok = True
         
         # --- CONDICIÓN PLATINUM (ELITE) ---
         # Ahora requiere CVD Futuros masivo (>30M) para ser considerado Platinum
         is_platinum = False
         cvd_fut_elite = abs(cvd_fut) > 30000000
-        if align_3m and macro_aligned and mfi_slope_ok and loc_ok and rvol_3m >= 1.2 and cvd_fut_elite:
+        if align_15m and macro_aligned and mfi_slope_ok and loc_ok and rvol_15m >= 1.2 and cvd_fut_elite:
             is_platinum = True
 
-        tp1_pct = (1.5 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
-        tp2_pct = (2.8 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
-        tp3_pct = (3.8 * atr_3m / alert.price) * 100 if alert.price > 0 else 0
+        # --- CALCULO DE SALIDAS DINÁMICAS (ATR BASED) ---
+        # SL: 1.5x ATR para dar "aire" contra el ruido (Whipsaw)
+        sl_pct = (1.5 * atr_15m / alert.price) * 100 if alert.price > 0 else 0.25
         
+        tp1_pct = (1.5 * atr_15m / alert.price) * 100 if alert.price > 0 else 0.75
+        tp2_pct = (2.8 * atr_15m / alert.price) * 100 if alert.price > 0 else 1.5
+        tp3_pct = (3.8 * atr_15m / alert.price) * 100 if alert.price > 0 else 2.5
+        
+        sl_val = alert.price * (1 - sl_pct/100) if is_buy_signal else alert.price * (1 + sl_pct/100)
         tp1 = alert.price * (1 + tp1_pct/100) if is_buy_signal else alert.price * (1 - tp1_pct/100)
         tp2 = alert.price * (1 + tp2_pct/100) if is_buy_signal else alert.price * (1 - tp2_pct/100)
         tp3 = alert.price * (1 + tp3_pct/100) if is_buy_signal else alert.price * (1 - tp3_pct/100)
 
         # --- SISTEMA DE PUNTUACIÓN (SCORING) ---
-        ms15_pts = 1 if macro_aligned else 0
-        ms3_pts = 1 if align_3m else 0
+        ms1h_pts = 1 if macro_aligned else 0
+        ms15_pts = 1 if align_15m else 0
         mfi_pts = 2 if mfi_slope_ok else 0
         loc_pts = 1 if loc_ok else 0
-        rvol_pts = 1 if rvol_3m >= 1.2 else 0
+        rvol_pts = 1 if rvol_15m >= 1.2 else 0
         spot_pts = 2 if (abs(cvd_spot) > 1000000 and ((is_buy_signal and cvd_spot > 0) or (not is_buy_signal and cvd_spot < 0))) else 0
         fut_pts = 2 if (abs(cvd_fut) > 5000000 and ((is_buy_signal and cvd_fut > 0) or (not is_buy_signal and cvd_fut < 0))) else 0
         oi_pts = 1 if (abs(oi_delta_5m) > 0.03 and ((is_buy_signal and oi_delta_5m > 0) or (not is_buy_signal and oi_delta_5m < 0))) else 0
@@ -272,13 +269,29 @@ async def receive_webhook(request: Request):
         # Bono Institucional: +2 puntos si hay presion masiva (>50M)
         inst_bonus = 2 if abs(cvd_fut) > 50000000 else 0
         
-        total_score = ms15_pts + ms3_pts + mfi_pts + loc_pts + rvol_pts + spot_pts + fut_pts + oi_pts + inst_bonus
+        total_score = ms1h_pts + ms15_pts + mfi_pts + loc_pts + rvol_pts + spot_pts + fut_pts + oi_pts + inst_bonus
+        
+        # --- FILTRO DE SOBRE-EXTENSIÓN (SEGURIDAD) ---
+        is_overextended = False
+        if vwap and stdev > 0:
+            dist_vwap_stdev = abs(alert.price - vwap) / stdev
+            if dist_vwap_stdev > 2.5: # Mas de 2.5 desviaciones es agotamiento probable
+                is_overextended = True
         
         # Nombres de Veredicto segun Score
         if is_platinum:
-            ver_name = "💎 PLATINUM SNIPER"
-            total_score = max(total_score, 11)
-        elif total_score >= 8: ver_name = "🟢 ALTA PROBABILIDAD"
+            if is_overextended:
+                ver_name = "🟡 MEDIA (PLATINUM AGOTADO)"
+                total_score = 7 # Bajamos el score por riesgo de reversion
+            else:
+                ver_name = "💎 PLATINUM SNIPER"
+                total_score = max(total_score, 11)
+        elif total_score >= 8:
+            if is_overextended:
+                ver_name = "🟡 MEDIA (SOBRE-EXTENDIDO)"
+                total_score = 6
+            else:
+                ver_name = "🟢 ALTA PROBABILIDAD"
         elif total_score >= 5: 
             # Restriccion de SHORTs en Probabilidad Media (Audit: 31.8% WR)
             if is_sell_signal and cvd_fut > 0:
@@ -296,8 +309,8 @@ async def receive_webhook(request: Request):
         spot_check = "✅" if spot_pts > 0 else "❌"
         fut_check = "✅" if fut_pts > 0 else "❌"
         oi_check = "✅" if oi_pts > 0 else "❌"
-        ms_3_check = "✅" if align_3m else "❌"
-        ms_15_check = "✅" if macro_aligned else "❌"
+        ms_15_check = "✅" if align_15m else "❌"
+        ms_1h_check = "✅" if macro_aligned else "❌"
         mfi_check = "✅" if mfi_slope_ok else "❌"
         
         mfi_emoji = "➖"
@@ -310,10 +323,10 @@ async def receive_webhook(request: Request):
 
         vwap_msg = "No data"
         if vwap:
-            if (is_buy_signal and alert.price > vwap) or (is_sell_signal and alert.price < vwap):
-                vwap_msg = f"✅ Precio ARRIBA del VWAP" if is_buy_signal else f"✅ Precio DEBAJO del VWAP"
-            else:
-                vwap_msg = f"❌ Precio contra el VWAP"
+            dist_units = abs(alert.price - vwap) / stdev if stdev > 0 else 0
+            check_vwap = "✅" if (is_buy_signal and alert.price > vwap) or (is_sell_signal and alert.price < vwap) else "❌"
+            ovx_msg = "⚠️ SOBRE-EXTENDIDO" if is_overextended else "Normal"
+            vwap_msg = f"{check_vwap} Dist. VWAP: {dist_units:.1f} SD ({ovx_msg})"
 
         # --- CONSTRUCCIÓN DEL MENSAJE TELEGRAM ---
         # Definir emojis para la señal
@@ -327,13 +340,13 @@ async def receive_webhook(request: Request):
             f"🎯 <b>OBJETIVOS SUGERIDOS (ATR Dynamic)</b>\n"
             f"┣ 🟢 TP 1 (Safe): +{tp1_pct:.2f}% (${tp1:,.1f})\n"
             f"┣ 💎 TP 2 (Platinum): +{tp2_pct:.2f}% (${tp2:,.1f})\n"
-            f"┗ 🚀 TP 3 (Moon): +{tp3_pct:.2f}% (${tp3:,.1f})\n"
-            f"<i>SL recomendado: -0.25% fijos.</i>\n\n"
+            f"┣ 🚀 TP 3 (Moon): +{tp3_pct:.2f}% (${tp3:,.1f})\n"
+            f"┗ 🛡️ <b>SL (Dynamic): -{sl_pct:.2f}% (${sl_val:,.1f})</b>\n\n"
             f"📊 <b>ORDEN FLOW & ESTRUCTURA</b>\n"
-            f"┣ [{ms_15_check}] Estructura 15m (1pt): {msg_15m}\n"
-            f"┣ [{ms_3_check}] Estructura 3m (1pt): {msg_3m} (RVOL {rvol_3m:.1f})\n"
+            f"┣ [{ms_1h_check}] Estructura 1h (1pt): {msg_1h}\n"
+            f"┣ [{ms_15_check}] Estructura 15m (1pt): {msg_15m} (RVOL {rvol_15m:.1f})\n"
             f"┣ [{mfi_check}] MFI Flow (2pts): {mfi_now:.1f} ({mfi_emoji})\n"
-            f"┣ [✅] Zona W.T (1pt): {wt1_3m:.1f}\n"
+            f"┣ [✅] Zona W.T (1pt): {wt1_15m:.1f}\n"
             f"┣ [{spot_check}] CVD Spot (2pts): ${cvd_spot:,.0f} ({spot_txt})\n"
             f"┣ [{fut_check}] CVD Futuros (2pts): ${cvd_fut:,.0f} ({fut_txt})\n"
             f"┣ [{oi_check}] Delta OI (5m/1pt): {oi_delta_5m:+.3f}% ({oi_txt})\n"
@@ -343,7 +356,7 @@ async def receive_webhook(request: Request):
         
         # --- NUEVA SECCIÓN: BITÁCORA Y SIMULACIÓN ---
         timestamp_id = get_now_utc3().strftime("%Y-%m-%d %H:%M:%S")
-        sl_val = alert.price * (1 - 0.0025) if is_buy_signal else alert.price * (1 + 0.0025)
+        # sl_val ya calculado arriba con ATR
         
         journal_entry = {
             "Timestamp": timestamp_id,
@@ -356,10 +369,10 @@ async def receive_webhook(request: Request):
             "CVD_Spot": int(cvd_spot),
             "CVD_Fut": int(cvd_fut),
             "OI_Delta": f"{oi_delta_5m:.4f}%", # Quitamos el + para evitar error de formula
-            "RVOL": round(rvol_3m, 2),
-            "WT_Zone": round(wt1_3m, 2),
+            "RVOL": round(rvol_15m, 2),
+            "WT_Zone": round(wt1_15m, 2),
+            "Structure_1h": msg_1h,
             "Structure_15m": msg_15m,
-            "Structure_3m": msg_3m,
             "TP1": tp1,
             "TP2": tp2,
             "TP3": tp3,
@@ -380,6 +393,22 @@ async def receive_webhook(request: Request):
             print(f"[!] Error al loguear/simular: {logger_err}")
 
         asyncio.create_task(send_telegram_message(msg_telegram))
+        
+        # --- INTEGRACIÓN BINANCE: EJECUCIÓN AUTOMÁTICA ---
+        # Solo ejecutamos si es Alta Probabilidad o Platinum
+        if total_score >= 8 or is_platinum:
+            binance_data = {
+                "symbol": SYMBOL.upper(),
+                "side": s_action,
+                "verdict": ver_name,
+                "tp_pct": tp3_pct / 100, # Usamos el Moon Target para la automatización
+                "sl_pct": sl_pct / 100,
+                "score": total_score
+            }
+            # Lanzamos la ejecución en segundo plano para no bloquear el webhook
+            asyncio.create_task(asyncio.to_thread(binance_executor.process_signal, binance_data))
+            print(f"[*] Señal enviada a Binance Executor: {SYMBOL} {s_action}")
+
         return {"status": "success", "verdict": verdict}
     except Exception as e:
         print(f"[!] ERROR EN WEBHOOK: {e}")
