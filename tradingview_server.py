@@ -12,8 +12,9 @@ from binance_executor import process_signal, check_real_exits
 
 # Import the existing variables and start functions from our data engine
 from binance_data import (
-    ctx, listen_futures_combined, listen_spot_combined, 
-    fetch_oi_loop, fetch_price_fallback, SYMBOL, display_context
+    ctx, listen_trades, listen_local_orderbook, listen_liquidations,
+    fetch_oi_loop, fetch_price_fallback, ws_watchdog, display_context,
+    SPOT_WS_URL, FUTURES_WS_URL, SYMBOL
 )
 
 app = FastAPI(title="High-Probability Webhook Engine")
@@ -29,20 +30,15 @@ class TVAlert(BaseModel):
 async def startup_event():
     # Start the Binance data engines in the background when the server starts
     print("[*] Iniciando Motores de Order Flow Avanzados...")
-    # 1. Motor de Datos Unificado (Futuros y Spot)
-    asyncio.create_task(listen_futures_combined())
-    asyncio.create_task(listen_spot_combined())
-    
-    # 2. Otros flujos de apoyo
+    asyncio.create_task(listen_trades(SPOT_WS_URL, is_spot=True))
+    asyncio.create_task(listen_trades(FUTURES_WS_URL, is_spot=False))
+    asyncio.create_task(listen_local_orderbook())
+    asyncio.create_task(listen_liquidations())
     asyncio.create_task(fetch_oi_loop())
     asyncio.create_task(fetch_price_fallback())
     asyncio.create_task(display_context())
-    
-    # 3. Monitor de cierres (Binance Executor)
     asyncio.create_task(check_real_exits())
-    
-    # 4. Watchdog opcional (Aunque el flujo maestro ya tiene su propia reconexión)
-    # asyncio.create_task(ws_watchdog())
+    asyncio.create_task(ws_watchdog())
     
     # DEBUG: Verificar si las variables de entorno están cargadas
     print(f"[*] API Key cargada: {'SÍ' if os.environ.get('BINANCE_API_KEY') else 'NO'}")
