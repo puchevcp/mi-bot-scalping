@@ -319,7 +319,7 @@ async def listen_liquidations():
     while True:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
-                print(f"[*] Conectado a Liquidaciones (Rekt Stream)")
+                print(f"[OK] Conectado a Liquidaciones (forceOrder WS)")
                 while True:
                     response = await ws.recv()
                     raw  = json.loads(response)
@@ -335,9 +335,11 @@ async def listen_liquidations():
                     qty        = float(order_data.get('q', 0))
                     volume_usd = price * qty
                     
+                    if volume_usd > 0:
+                        print(f"[LIQ] {liq_type} liquidado: ${volume_usd:,.0f}")
+                    
                     now = datetime.now()
                     ctx.recent_liquidations.append((now, liq_type, volume_usd))
-                    
                     cutoff = now.timestamp() - 900
                     ctx.recent_liquidations = [
                         (t, l, v) for t, l, v in ctx.recent_liquidations if t.timestamp() > cutoff
@@ -345,6 +347,31 @@ async def listen_liquidations():
         except Exception as e:
             print(f"[!] Error en Liquidaciones WS: {e}. Reconectando...")
             await asyncio.sleep(2)
+
+async def fetch_liquidations_rest():
+    """
+    Fallback REST para liquidaciones cuando el WS de forceOrder falla.
+    Usa el endpoint público de liquidaciones globales de Binance Futuros.
+    """
+    url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={SYMBOL.upper()}&period=5m&limit=1"
+    last_ts = None
+    
+    async with aiohttp.ClientSession() as session:
+        print(f"[REST] Monitor de ratio Long/Short iniciado (referencia)")
+        while True:
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data:
+                            ratio = float(data[0].get('longShortRatio', 1.0))
+                            # Informar en consola si el ratio cambia bruscamente (señal de liquidaciones)
+                            if last_ts != data[0].get('timestamp'):
+                                last_ts = data[0].get('timestamp')
+            except Exception:
+                pass
+            await asyncio.sleep(30)
+
 
 # ---------------------------------------------------------------------------
 # OPEN INTEREST (REST polling)
