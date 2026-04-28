@@ -94,8 +94,15 @@ async def listen_trades(ws_url, is_spot=False):
                 while True:
                     response = await ws.recv()
                     raw_data = json.loads(response)
-                    data = raw_data.get('data', {}) # En /stream el objeto viene dentro de 'data'
-                    if not data: continue
+                    
+                    # Soporte dual: /stream (objeto 'data') o /ws (objeto directo)
+                    if 'data' in raw_data:
+                        data = raw_data['data']
+                    else:
+                        data = raw_data
+                    
+                    if not isinstance(data, dict) or 'p' not in data: 
+                        continue
                     # print(f"DEBUG {name}: {data}") # Opcional: ver todos los mensajes
                     
                     price = float(data['p'])
@@ -167,8 +174,8 @@ async def listen_local_orderbook():
                 while True:
                     response = await ws.recv()
                     raw_data = json.loads(response)
-                    data = raw_data.get('data', {})
-                    if not data: continue
+                    data = raw_data.get('data', raw_data)
+                    if not isinstance(data, dict): continue
                     
                     if data['u'] <= ctx.last_update_id:
                         continue # Descartar updates viejos
@@ -255,8 +262,8 @@ async def listen_liquidations():
                 while True:
                     response = await ws.recv()
                     raw_data = json.loads(response)
-                    data = raw_data.get('data', {})
-                    if not data: continue
+                    data = raw_data.get('data', raw_data)
+                    if not isinstance(data, dict): continue
                     
                     order_data = data.get('o', {})
                     if not order_data: continue
