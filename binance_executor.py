@@ -25,6 +25,8 @@ import json
 import logging
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+import asyncio
+from telegram_notifier import send_telegram_message
 
 try:
     from binance import Client, ThreadedWebsocketManager
@@ -288,6 +290,10 @@ def process_signal(signal_data: dict) -> dict:
             orders = _place_sl_tp(client, symbol, side, qty * 2, avg_entry, sl_pct, tp_pct, info["tick_size"])
             pos.update(orders)
             active_positions[symbol] = pos
+            
+            # Notificar DCA en Telegram
+            msg = f"🔄 <b>DCA EJECUTADO (Trama 2)</b>\nPar: {symbol}\nLado: {side}\nPrecio: ${tranche2_price:,.2f}\nPromedio Actual: ${avg_entry:,.2f}"
+            asyncio.create_task(send_telegram_message(msg))
 
             return {"status": "dca_tranche2", "symbol": symbol, "avg_entry": avg_entry}
 
@@ -337,6 +343,11 @@ def process_signal(signal_data: dict) -> dict:
     }
 
     log.info(f"Posicion registrada: {symbol} {side} | Tramo: 1 | Precio: {exec_price}")
+    
+    # Notificar Entrada en Telegram
+    msg = f"🚀 <b>POSICIÓN ABIERTA (Binance)</b>\nPar: {symbol}\nLado: {side}\nPrecio: ${exec_price:,.2f}\nTramo: 1/2"
+    asyncio.create_task(send_telegram_message(msg))
+    
     return {"status": "opened", "symbol": symbol, "side": side, "entry": exec_price}
 
 
@@ -345,6 +356,44 @@ def close_position(symbol: str, reason: str = "manual"):
     if symbol in active_positions:
         del active_positions[symbol]
         log.info(f"Posicion {symbol} cerrada y liberada ({reason})")
+        
+        # Notificar Cierre en Telegram
+        msg = f"📉 <b>POSICIÓN CERRADA (Binance)</b>\nPar: {symbol}\nMotivo: {reason.upper()}"
+        asyncio.create_task(send_telegram_message(msg))
+
+async def check_real_exits():
+    """
+    Compara las posiciones activas en memoria vs las posiciones reales en Binance.
+    Si una posicion desaparece de Binance, se marca como cerrada.
+    """
+    client = _get_client()
+    if not client: return
+    
+    while True:
+        try:
+            # Obtener todas las posiciones abiertas en Binance Futuros
+            acc_info = client.futures_account()
+            positions = acc_info.get('positions', [])
+            
+            # Crear un set de simbolos con posición abierta REAL (qty != 0)
+            real_open_symbols = set()
+            for p in positions:
+                if float(p.get('positionAmt', 0)) != 0:
+                    real_open_symbols.add(p['symbol'])
+            
+            # Revisar nuestras posiciones en memoria
+            symbols_to_close = []
+            for symbol in active_positions.keys():
+                if symbol not in real_open_symbols:
+                    symbols_to_close.append(symbol)
+            
+            for sym in symbols_to_close:
+                close_position(sym, reason="TP/SL Hit en Binance")
+                
+        except Exception as e:
+            log.error(f"Error en monitor de cierres: {e}")
+            
+        await asyncio.sleep(60) # Revisar cada minuto
 
 
 def status():

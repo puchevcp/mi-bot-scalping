@@ -55,10 +55,11 @@ async def listen_trades(ws_url, is_spot=False):
     while True:
         try:
             async with websockets.connect(url) as ws:
-                print(f"[*] Conectado a AggTrades ({name})")
+                print(f"[OK] Conectado a AggTrades ({name}) - URL: {url}")
                 while True:
                     response = await ws.recv()
                     data = json.loads(response)
+                    # print(f"DEBUG {name}: {data}") # Opcional: ver todos los mensajes
                     
                     price = float(data['p'])
                     qty = float(data['q'])
@@ -77,6 +78,7 @@ async def listen_trades(ws_url, is_spot=False):
                     
                     if not is_spot:
                         ctx.price = price # Actualizamos precio global con futuros
+                        if ctx.price == 0: print(f"DEBUG: Precio actualizado a {price}")
                     
                     # Logica CVD
                     if is_buyer_maker: # Venta

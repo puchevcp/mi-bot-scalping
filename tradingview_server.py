@@ -8,7 +8,7 @@ import aiohttp
 import os
 from datetime import datetime
 from journal_manager import log_signal, simulate_trade, get_now_utc3
-import binance_executor
+from binance_executor import process_signal, check_real_exits
 
 # Import the existing variables and start functions from our data engine
 from binance_data import (
@@ -35,6 +35,11 @@ async def startup_event():
     asyncio.create_task(listen_liquidations())
     asyncio.create_task(fetch_oi_loop())
     asyncio.create_task(display_context())
+    asyncio.create_task(check_real_exits())
+    
+    # DEBUG: Verificar si las variables de entorno están cargadas
+    print(f"[*] API Key cargada: {'SÍ' if os.environ.get('BINANCE_API_KEY') else 'NO'}")
+    print(f"[*] Testnet activo: {'SÍ' if os.environ.get('USE_TESTNET', 'false').lower() == 'true' else 'NO'}")
 import math
 from datetime import datetime, timezone
 
@@ -364,8 +369,8 @@ async def receive_webhook(request: Request):
             "Pair": alert.pair,
             "Price": alert.price,
             "Verdict": ver_name,
-            "Score": f"{total_score}/11",
-            "MFI_Val": round(mfi_now, 2),
+            "Score": f"{total_score}/13",
+            "MFI_Val": round(mfi_now, 2) if mfi_now is not None else 0,
             "CVD_Spot": int(cvd_spot),
             "CVD_Fut": int(cvd_fut),
             "OI_Delta": f"{oi_delta_5m:.4f}%", # Quitamos el + para evitar error de formula
@@ -406,7 +411,7 @@ async def receive_webhook(request: Request):
                 "score": total_score
             }
             # Lanzamos la ejecución en segundo plano para no bloquear el webhook
-            asyncio.create_task(asyncio.to_thread(binance_executor.process_signal, binance_data))
+            asyncio.create_task(asyncio.to_thread(process_signal, binance_data))
             print(f"[*] Señal enviada a Binance Executor: {SYMBOL} {s_action}")
 
         return {"status": "success", "verdict": verdict}

@@ -11,7 +11,7 @@ GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbw_1zvhAxMoY_sXoADU
 COLUMNS = [
     "Timestamp", "Signal", "Pair", "Price", "Verdict", "Score",
     "MFI_Val", "CVD_Spot", "CVD_Fut", "OI_Delta", "RVOL", "WT_Zone",
-    "Structure_15m", "Structure_3m", "TP1", "TP2", "TP3", "SL",
+    "Structure_15m", "Structure_1h", "Structure_3m", "TP1", "TP2", "TP3", "SL",
     "Result", "Close_Price", "Exit_Time"
 ]
 
