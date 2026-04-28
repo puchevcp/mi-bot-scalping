@@ -412,8 +412,8 @@ async def receive_webhook(request: Request):
         asyncio.create_task(send_telegram_message(msg_telegram))
         
         # --- INTEGRACIÓN BINANCE: EJECUCIÓN AUTOMÁTICA ---
-        # Solo ejecutamos si es Alta Probabilidad o Platinum
-        if total_score >= 8 or is_platinum:
+        # A pedido del usuario: Ejecutar TODAS las señales (Score >= 1) para recolectar datos en 15m
+        if total_score >= 1 or is_platinum:
             binance_data = {
                 "symbol": SYMBOL.upper(),
                 "side": s_action,
@@ -422,8 +422,8 @@ async def receive_webhook(request: Request):
                 "sl_pct": sl_pct / 100,
                 "score": total_score
             }
-            # Lanzamos la ejecución en segundo plano para no bloquear el webhook
-            asyncio.create_task(asyncio.to_thread(process_signal, binance_data))
+            # Lanzamos la ejecución en segundo plano
+            asyncio.create_task(process_signal(binance_data))
             print(f"[*] Señal enviada a Binance Executor: {SYMBOL} {s_action}")
 
         return {"status": "success", "verdict": verdict}

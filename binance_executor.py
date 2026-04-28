@@ -27,9 +27,10 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 import asyncio
 from telegram_notifier import send_telegram_message
+from journal_manager import log_binance_trade, get_now_utc3
 
 try:
-    from binance import Client, ThreadedWebsocketManager
+    from binance import AsyncClient, ThreadedWebsocketManager
     from binance.exceptions import BinanceAPIException
     BINANCE_OK = True
 except ImportError:
@@ -69,7 +70,7 @@ log = logging.getLogger("BinanceExecutor")
 active_positions = {}
 
 
-def _get_client():
+async def _get_client():
     """Crea el cliente de Binance con la configuración correcta."""
     if not BINANCE_OK:
         log.error("python-binance no instalado. Instala con: pip install python-binance")
@@ -78,9 +79,9 @@ def _get_client():
         log.info("[DRY_RUN] Cliente Binance simulado (sin conexión real)")
         return None
 
-    client = Client(API_KEY, API_SECRET, testnet=USE_TESTNET)
+    client = await AsyncClient.create(API_KEY, API_SECRET, testnet=USE_TESTNET)
     mode_str = "TESTNET" if USE_TESTNET else "PRODUCCION REAL"
-    log.info(f"Conectado a Binance Futures ({mode_str})")
+    log.info(f"Conectado a Async Binance Futures ({mode_str})")
     return client
 
 
@@ -91,12 +92,12 @@ def _is_trading_hours():
     return HOUR_START <= now_local.hour < HOUR_END
 
 
-def _get_balance(client):
+async def _get_balance(client):
     """Obtiene el balance disponible de USDT en Futuros."""
     if DRY_RUN:
         return 1000.0  # Balance ficticio en modo DRY_RUN
     try:
-        account = client.futures_account_balance()
+        account = await client.futures_account_balance()
         for asset in account:
             if asset["asset"] == "USDT":
                 return float(asset["availableBalance"])
@@ -105,12 +106,12 @@ def _get_balance(client):
     return 0.0
 
 
-def _get_symbol_info(client, symbol):
+async def _get_symbol_info(client, symbol):
     """Obtiene info del símbolo (tick size, step size, precio actual)."""
     if DRY_RUN:
         return {"tick_size": 0.01, "step_size": 0.001, "current_price": None}
     try:
-        info = client.futures_exchange_info()
+        info = await client.futures_exchange_info()
         for s in info["symbols"]:
             if s["symbol"] == symbol:
                 tick_size = None
@@ -120,7 +121,8 @@ def _get_symbol_info(client, symbol):
                         tick_size = float(f["tickSize"])
                     if f["filterType"] == "LOT_SIZE":
                         step_size = float(f["stepSize"])
-                price = float(client.futures_symbol_ticker(symbol=symbol)["price"])
+                ticker = await client.futures_symbol_ticker(symbol=symbol)
+                price = float(ticker["price"])
                 return {"tick_size": tick_size, "step_size": step_size, "current_price": price}
     except Exception as e:
         log.error(f"Error obteniendo info de {symbol}: {e}")
@@ -146,7 +148,7 @@ def _calc_quantity(balance, tranche_risk, price, step_size, sl_pct):
     return _round_qty(raw_qty, step_size)
 
 
-def _place_sl_tp(client, symbol, side, quantity, entry_price, sl_pct, tp_pct, tick_size):
+async def _place_sl_tp(client, symbol, side, quantity, entry_price, sl_pct, tp_pct, tick_size):
     """Coloca las órdenes de Stop Loss y Take Profit en la posición."""
     if side == "BUY":
         sl_price = _round_price(entry_price * (1 - sl_pct), tick_size)
@@ -161,14 +163,14 @@ def _place_sl_tp(client, symbol, side, quantity, entry_price, sl_pct, tp_pct, ti
         log.info(f"[DRY_RUN] SL @ {sl_price} | TP @ {tp_price} (Cantidad: {quantity})")
         return {"sl_id": "dry_sl", "tp_id": "dry_tp", "sl_price": sl_price, "tp_price": tp_price}
 
-    sl_order = client.futures_create_order(
+    sl_order = await client.futures_create_order(
         symbol=symbol,
         side=close_side,
         type="STOP_MARKET",
         stopPrice=sl_price,
         closePosition=True
     )
-    tp_order = client.futures_create_order(
+    tp_order = await client.futures_create_order(
         symbol=symbol,
         side=close_side,
         type="TAKE_PROFIT_MARKET",
@@ -179,7 +181,7 @@ def _place_sl_tp(client, symbol, side, quantity, entry_price, sl_pct, tp_pct, ti
     return {"sl_id": sl_order["orderId"], "tp_id": tp_order["orderId"], "sl_price": sl_price, "tp_price": tp_price}
 
 
-def _cancel_open_sl_tp(client, symbol, position):
+async def _cancel_open_sl_tp(client, symbol, position):
     """Cancela SL y TP previos antes de actualizar la posición."""
     if DRY_RUN:
         return
@@ -187,7 +189,7 @@ def _cancel_open_sl_tp(client, symbol, position):
         oid = position.get(key)
         if oid and oid != "dry_sl" and oid != "dry_tp":
             try:
-                client.futures_cancel_order(symbol=symbol, orderId=oid)
+                await client.futures_cancel_order(symbol=symbol, orderId=oid)
                 log.info(f"Orden {oid} cancelada para recolocar en posicion promediada")
             except BinanceAPIException as e:
                 log.warning(f"No se pudo cancelar orden {oid}: {e}")
@@ -196,7 +198,7 @@ def _cancel_open_sl_tp(client, symbol, position):
 # ============================================================
 # FUNCIÓN PRINCIPAL: PROCESAR SEÑAL DEL WEBHOOK
 # ============================================================
-def process_signal(signal_data: dict) -> dict:
+async def process_signal(signal_data: dict) -> dict:
     """
     Recibe los datos del webhook y ejecuta la lógica DCA en Binance.
 
@@ -225,12 +227,10 @@ def process_signal(signal_data: dict) -> dict:
         log.info(f"Fuera de horario de trading ({HOUR_START}-{HOUR_END}hs UTC{UTC_OFFSET}). Señal ignorada.")
         return {"status": "ignored", "reason": "out_of_hours"}
 
-    # 2. Filtro de calidad (solo Alta y Media probabilidad)
-    if "BAJA" in verdict.upper():
-        log.info(f"Señal de BAJA probabilidad ignorada.")
-        return {"status": "ignored", "reason": "low_probability"}
+    # Filtro de calidad eliminado a pedido del usuario (Ejecutar TODO en 15m)
+    # if "BAJA" in verdict.upper(): ...
 
-    client = _get_client()
+    client = await _get_client()
 
     # 3. Verificar si ya tenemos posición en ese par
     if symbol in active_positions:
@@ -245,11 +245,12 @@ def process_signal(signal_data: dict) -> dict:
             # ---- TRAMO 2: Orden LIMIT para promediar ----
             log.info(f"Señal DCA detectada para {symbol}. Ejecutando TRAMO 2 (LIMIT)...")
             
-            info = _get_symbol_info(client, symbol)
+            info = await _get_symbol_info(client, symbol)
             if info is None:
+                if not DRY_RUN: await client.close_connection()
                 return {"status": "error", "reason": "no_symbol_info"}
             
-            balance = _get_balance(client)
+            balance = await _get_balance(client)
             current_price = info["current_price"] or pos["entries"][0]
             
             # Orden Limit ligeramente dentro del spread (precio un 0.02% más agresivo)
@@ -265,7 +266,7 @@ def process_signal(signal_data: dict) -> dict:
                 tranche2_price = limit_price
             else:
                 try:
-                    order = client.futures_create_order(
+                    order = await client.futures_create_order(
                         symbol=symbol,
                         side=side,
                         type="LIMIT",
@@ -277,6 +278,7 @@ def process_signal(signal_data: dict) -> dict:
                     log.info(f"Tramo 2 LIMIT colocado: {order['orderId']} @ {tranche2_price}")
                 except BinanceAPIException as e:
                     log.error(f"Error colocando LIMIT DCA: {e}")
+                    if not DRY_RUN: await client.close_connection()
                     return {"status": "error", "reason": str(e)}
 
             # Actualizar posición con precio promedio
@@ -286,15 +288,16 @@ def process_signal(signal_data: dict) -> dict:
             log.info(f"Precio promedio actualizado: {avg_entry:.4f}")
 
             # Cancelar SL/TP anterior y reposicionar
-            _cancel_open_sl_tp(client, symbol, pos)
-            orders = _place_sl_tp(client, symbol, side, qty * 2, avg_entry, sl_pct, tp_pct, info["tick_size"])
+            await _cancel_open_sl_tp(client, symbol, pos)
+            orders = await _place_sl_tp(client, symbol, side, qty * 2, avg_entry, sl_pct, tp_pct, info["tick_size"])
             pos.update(orders)
             active_positions[symbol] = pos
             
             # Notificar DCA en Telegram
             msg = f"🔄 <b>DCA EJECUTADO (Trama 2)</b>\nPar: {symbol}\nLado: {side}\nPrecio: ${tranche2_price:,.2f}\nPromedio Actual: ${avg_entry:,.2f}"
-            asyncio.create_task(send_telegram_message(msg))
+            await send_telegram_message(msg)
 
+            if not DRY_RUN: await client.close_connection()
             return {"status": "dca_tranche2", "symbol": symbol, "avg_entry": avg_entry}
 
         else:
@@ -305,11 +308,12 @@ def process_signal(signal_data: dict) -> dict:
     # 4. SIN posición: TRAMO 1 con MARKET
     log.info(f"Nueva posición: TRAMO 1 MARKET {side} {symbol}...")
     
-    info = _get_symbol_info(client, symbol)
+    info = await _get_symbol_info(client, symbol)
     if info is None:
+        if not DRY_RUN: await client.close_connection()
         return {"status": "error", "reason": "no_symbol_info"}
 
-    balance = _get_balance(client)
+    balance = await _get_balance(client)
     current_price = info["current_price"] or 0
     qty = _calc_quantity(balance, RISK_PER_TRANCHE, current_price or 1, info["step_size"], sl_pct)
 
@@ -318,7 +322,7 @@ def process_signal(signal_data: dict) -> dict:
         log.info(f"[DRY_RUN] TRAMO 1 MARKET {side} {qty} {symbol} @ ~{exec_price}")
     else:
         try:
-            order = client.futures_create_order(
+            order = await client.futures_create_order(
                 symbol=symbol,
                 side=side,
                 type="MARKET",
@@ -329,10 +333,11 @@ def process_signal(signal_data: dict) -> dict:
             log.info(f"Tramo 1 MARKET ejecutado: {order['orderId']} @ {exec_price}")
         except BinanceAPIException as e:
             log.error(f"Error colocando MARKET: {e}")
+            if not DRY_RUN: await client.close_connection()
             return {"status": "error", "reason": str(e)}
 
     # Colocar SL y TP
-    orders = _place_sl_tp(client, symbol, side, qty, exec_price, sl_pct, tp_pct, info["tick_size"])
+    orders = await _place_sl_tp(client, symbol, side, qty, exec_price, sl_pct, tp_pct, info["tick_size"])
 
     # Registrar posición activa
     active_positions[symbol] = {
@@ -344,35 +349,62 @@ def process_signal(signal_data: dict) -> dict:
 
     log.info(f"Posicion registrada: {symbol} {side} | Tramo: 1 | Precio: {exec_price}")
     
+    # --- AUDITORÍA REAL ---
+    log_binance_trade({
+        "Timestamp": get_now_utc3().strftime("%Y-%m-%d %H:%M:%S"),
+        "Symbol": symbol,
+        "Side": side,
+        "Entry_Price": exec_price,
+        "Tranche": 1,
+        "SL": orders.get("sl_price"),
+        "TP": orders.get("tp_price"),
+        "Order_ID": orders.get("sl_id", "N/A"),
+        "Status": "OPEN"
+    })
+    
     # Notificar Entrada en Telegram
     msg = f"🚀 <b>POSICIÓN ABIERTA (Binance)</b>\nPar: {symbol}\nLado: {side}\nPrecio: ${exec_price:,.2f}\nTramo: 1/2"
-    asyncio.create_task(send_telegram_message(msg))
+    await send_telegram_message(msg)
     
+    if not DRY_RUN: await client.close_connection()
     return {"status": "opened", "symbol": symbol, "side": side, "entry": exec_price}
 
 
-def close_position(symbol: str, reason: str = "manual"):
+async def close_position(symbol: str, reason: str = "manual"):
     """Cierra y elimina del registro una posición abierta (llamado por SL/TP callback o manual)."""
     if symbol in active_positions:
         del active_positions[symbol]
         log.info(f"Posicion {symbol} cerrada y liberada ({reason})")
         
+        # --- AUDITORÍA REAL ---
+        log_binance_trade({
+            "Timestamp": get_now_utc3().strftime("%Y-%m-%d %H:%M:%S"),
+            "Symbol": symbol,
+            "Side": "CLOSE",
+            "Entry_Price": 0,
+            "Tranche": 0,
+            "SL": 0,
+            "TP": 0,
+            "Order_ID": "N/A",
+            "Status": f"CLOSED ({reason.upper()})"
+        })
+        
         # Notificar Cierre en Telegram
         msg = f"📉 <b>POSICIÓN CERRADA (Binance)</b>\nPar: {symbol}\nMotivo: {reason.upper()}"
-        asyncio.create_task(send_telegram_message(msg))
+        await send_telegram_message(msg)
 
 async def check_real_exits():
     """
     Compara las posiciones activas en memoria vs las posiciones reales en Binance.
     Si una posicion desaparece de Binance, se marca como cerrada.
     """
-    client = _get_client()
+    client = await _get_client()
     if not client: return
     
     while True:
         try:
             # Obtener todas las posiciones abiertas en Binance Futuros
-            acc_info = client.futures_account()
+            acc_info = await client.futures_account()
             positions = acc_info.get('positions', [])
             
             # Crear un set de simbolos con posición abierta REAL (qty != 0)

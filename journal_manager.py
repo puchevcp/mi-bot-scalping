@@ -5,7 +5,13 @@ import aiohttp
 from datetime import datetime, timedelta, timezone
 
 JOURNAL_FILE = "trades_journal.csv"
+BINANCE_AUDIT_FILE = "binance_audit.csv"
 GOOGLE_SHEETS_URL = "https://script.google.com/macros/s/AKfycbw_1zvhAxMoY_sXoADUi8BYsAxIfxZCA_eP08BXk5S_NFxQAyDLLrbfLhB38ux2E8ku/exec"
+
+# Columnas de la Bitácora de Binance (Auditoría Real)
+AUDIT_COLUMNS = [
+    "Timestamp", "Symbol", "Side", "Entry_Price", "Tranche", "SL", "TP", "Order_ID", "Status"
+]
 
 # Columnas de la Bitácora (Orden Forense)
 COLUMNS = [
@@ -34,6 +40,18 @@ def log_signal(data):
     
     # Sincronizar con la nube
     asyncio.create_task(sync_to_sheets(data))
+
+def log_binance_trade(data):
+    """Guarda una operación REAL ejecutada en Binance para auditoría."""
+    if not os.path.exists(BINANCE_AUDIT_FILE):
+        with open(BINANCE_AUDIT_FILE, mode='w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=AUDIT_COLUMNS)
+            writer.writeheader()
+            
+    with open(BINANCE_AUDIT_FILE, mode='a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=AUDIT_COLUMNS)
+        writer.writerow(data)
+    print(f"[AUDIT] Operación registrada en {BINANCE_AUDIT_FILE}")
 
 async def sync_to_sheets(data):
     """Envía los datos al Webhook de Google Apps Script."""
