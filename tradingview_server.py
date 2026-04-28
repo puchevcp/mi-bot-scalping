@@ -13,7 +13,8 @@ from binance_executor import process_signal, check_real_exits
 # Import the existing variables and start functions from our data engine
 from binance_data import (
     ctx, listen_trades, listen_local_orderbook, listen_liquidations,
-    fetch_oi_loop, fetch_price_fallback, ws_watchdog, display_context,
+    fetch_oi_loop, fetch_price_fallback, fetch_futures_cvd_rest,
+    ws_watchdog, display_context,
     SPOT_WS_URL, FUTURES_WS_URL, SYMBOL
 )
 
@@ -30,10 +31,10 @@ class TVAlert(BaseModel):
 async def startup_event():
     # Start the Binance data engines in the background when the server starts
     print("[*] Iniciando Motores de Order Flow Avanzados...")
-    asyncio.create_task(listen_trades(SPOT_WS_URL, is_spot=True))
-    asyncio.create_task(listen_trades(FUTURES_WS_URL, is_spot=False))
-    asyncio.create_task(listen_local_orderbook())
-    asyncio.create_task(listen_liquidations())
+    asyncio.create_task(listen_trades(SPOT_WS_URL, is_spot=True))          # CVD Spot (WS)
+    asyncio.create_task(fetch_futures_cvd_rest())                           # CVD Futuros + POC (REST fallback)
+    asyncio.create_task(listen_local_orderbook())                           # Heatmap (WS Futuros)
+    asyncio.create_task(listen_liquidations())                              # Liquidaciones (WS Futuros)
     asyncio.create_task(fetch_oi_loop())
     asyncio.create_task(fetch_price_fallback())
     asyncio.create_task(display_context())

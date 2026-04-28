@@ -67,9 +67,77 @@ async def fetch_price_fallback():
                             ctx.price = float(data['price'])
                             if stale:
                                 print(f"[REST] Precio obtenido por fallback: ${ctx.price:,.2f}")
-            except Exception as e:
+            except Exception:
                 pass
             await asyncio.sleep(5)
+
+# ---------------------------------------------------------------------------
+# CVD FUTUROS VIA REST (fallback cuando fstream.binance.com está bloqueado)
+# Usa /fapi/v1/aggTrades para calcular el delta de cada ciclo de polling.
+# ---------------------------------------------------------------------------
+async def fetch_futures_cvd_rest():
+    """
+    Calcula el CVD de Futuros usando la API REST en lugar del WebSocket.
+    Esto es necesario cuando fstream.binance.com está bloqueado desde Render.
+    """
+    url = f"https://fapi.binance.com/fapi/v1/aggTrades?symbol={SYMBOL.upper()}&limit=100"
+    last_trade_id = None
+    
+    async with aiohttp.ClientSession() as session:
+        print(f"[REST] Iniciando CVD Futuros via REST (fallback)")
+        while True:
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        trades = await resp.json()
+                        if not trades:
+                            await asyncio.sleep(2)
+                            continue
+                        
+                        # Solo procesar trades nuevos (más recientes que el último ID visto)
+                        new_trades = trades
+                        if last_trade_id is not None:
+                            new_trades = [t for t in trades if t['a'] > last_trade_id]
+                        
+                        if new_trades:
+                            last_trade_id = new_trades[-1]['a']
+                            ctx.last_futures_msg = datetime.now()
+                            
+                            for trade in new_trades:
+                                price  = float(trade['p'])
+                                qty    = float(trade['q'])
+                                vol    = price * qty
+                                is_seller = trade['m']  # True = venta a mercado
+                                
+                                # Actualizar precio
+                                ctx.price = price
+                                
+                                # CVD
+                                if is_seller: ctx.futures_cvd -= vol
+                                else:         ctx.futures_cvd += vol
+                                
+                                # Volume Profile & POC
+                                rounded = round(price / 50) * 50
+                                ctx.volume_profile[rounded] = ctx.volume_profile.get(rounded, 0) + vol
+                            
+                            if ctx.volume_profile:
+                                ctx.session_poc_price = max(ctx.volume_profile, key=ctx.volume_profile.get)
+                        
+                        # Reset diario
+                        now_utc = datetime.now(timezone.utc)
+                        if now_utc.day != ctx.current_session_day:
+                            ctx.futures_cvd = 0.0
+                            ctx.spot_cvd    = 0.0
+                            ctx.volume_profile.clear()
+                            ctx.session_poc_price   = 0.0
+                            ctx.current_session_day = now_utc.day
+                            last_trade_id           = None
+                            print(f"[RESET] Sesion UTC reiniciada.")
+
+            except Exception as e:
+                print(f"[REST CVD] Error: {e}")
+            
+            await asyncio.sleep(2)  # Polling cada 2 segundos
 
 # ---------------------------------------------------------------------------
 # CVD: AggTrades (Spot y Futuros por separado — igual que version 3m)
