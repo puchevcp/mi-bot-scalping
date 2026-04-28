@@ -13,7 +13,8 @@ from binance_executor import process_signal, check_real_exits
 # Import the existing variables and start functions from our data engine
 from binance_data import (
     ctx, listen_trades, SPOT_WS_URL, FUTURES_WS_URL, SYMBOL,
-    listen_local_orderbook, listen_liquidations, fetch_oi_loop, display_context
+    listen_local_orderbook, listen_liquidations, fetch_oi_loop, display_context,
+    fetch_price_fallback, ws_watchdog
 )
 
 app = FastAPI(title="High-Probability Webhook Engine")
@@ -36,6 +37,10 @@ async def startup_event():
     asyncio.create_task(fetch_oi_loop())
     asyncio.create_task(display_context())
     asyncio.create_task(check_real_exits())
+    asyncio.create_task(fetch_price_fallback())
+    
+    # Iniciar el watchdog de WebSockets
+    asyncio.create_task(ws_watchdog())
     
     # DEBUG: Verificar si las variables de entorno están cargadas
     print(f"[*] API Key cargada: {'SÍ' if os.environ.get('BINANCE_API_KEY') else 'NO'}")
@@ -44,11 +49,14 @@ import math
 from datetime import datetime, timezone
 
 def analyze_structure(data, is_buy_signal, tf_name) -> tuple[bool, str, float]:
-    if not isinstance(data, list) or len(data) < 11: 
+    if not isinstance(data, list) or len(data) < 15: 
         return False, f"Pocos datos ({tf_name})", 1.0
         
-    # Extraer ultimas 4 velas para la estructura
-    struct_candles = data[-4:]
+    # Usamos las velas CERRADAS (excluyendo la ultima si esta incompleta)
+    # data[-1] es la vela en curso. data[-2] es la ultima cerrada.
+    closed_candles = data[:-1]
+    
+    struct_candles = closed_candles[-4:] # Ultimas 4 cerradas
     bull_vol = 0.0
     bear_vol = 0.0
     candles = []
@@ -59,23 +67,27 @@ def analyze_structure(data, is_buy_signal, tf_name) -> tuple[bool, str, float]:
         if close > o: bull_vol += v
         else: bear_vol += v
         
-    # Calcular RVOL (Volumen de la ultima vela vs promedio de las 10 anteriores)
-    vol_actual = candles[-1]["vol"]
-    vols_hist = [float(c[5]) for c in data[-11:-1]]
-    vol_promedio = sum(vols_hist) / len(vols_hist)
-    rvol = vol_actual / vol_promedio if vol_promedio > 0 else 1.0
+    # Calcular RVOL de la ULTIMA VELA CERRADA vs promedio de las 10 anteriores
+    vol_last_closed = candles[-1]["vol"]
+    vols_hist = [float(c[5]) for c in closed_candles[-11:-1]]
+    vol_promedio = sum(vols_hist) / len(vols_hist) if vols_hist else 1.0
+    
+    rvol = vol_last_closed / vol_promedio if vol_promedio > 0 else 1.0
     
     r_ok = (rvol >= 1.2)
     rvol_tag = f" ⭐ (RVOL {rvol:.1f})" if r_ok else f" (RVOL {rvol:.1f})"
     
+    # Estructura de PA (Price Action)
     if is_buy_signal:
-        if candles[3]["low"] >= candles[1]["low"] * 0.999: # HL o plano
-            if bull_vol > bear_vol: return True, f"Alcista (HL) + Vol. Compra{rvol_tag}", rvol
+        # HL: Low de la cerrada actual >= Low de la cerrada de hace 2 velas
+        if candles[3]["low"] >= candles[1]["low"] * 0.999: 
+            if bull_vol >= bear_vol: return True, f"Alcista (HL) + Vol. Compra{rvol_tag}", rvol
             else: return False, f"Sin Vol. Comprador{rvol_tag}", rvol
         else: return False, f"Rompiendo a la Baja{rvol_tag}", rvol
     else:
-        if candles[3]["high"] <= candles[1]["high"] * 1.001: # LH o plano
-            if bear_vol > bull_vol: return True, f"Bajista (LH) + Vol. Venta{rvol_tag}", rvol
+        # LH: High de la cerrada actual <= High de la cerrada de hace 2 velas
+        if candles[3]["high"] <= candles[1]["high"] * 1.001:
+            if bear_vol >= bull_vol: return True, f"Bajista (LH) + Vol. Venta{rvol_tag}", rvol
             else: return False, f"Sin Vol. Vendedor{rvol_tag}", rvol
         else: return False, f"Rompiendo al Alza{rvol_tag}", rvol
 

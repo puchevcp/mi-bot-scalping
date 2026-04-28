@@ -44,8 +44,41 @@ class MarketContext:
         
         # Tracking the current UTC Day to reset "Session" metrics
         self.current_session_day = datetime.now(timezone.utc).day
+        self.last_futures_update = datetime.now()
 
 ctx = MarketContext()
+
+async def fetch_price_fallback():
+    """ Si el WebSocket falla, pedimos el precio por REST cada 5 seg. """
+    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={SYMBOL.upper()}"
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                # Solo pedimos si el precio es 0 o no se ha actualizado en 10 seg
+                if ctx.price == 0 or (datetime.now() - ctx.last_futures_update).total_seconds() > 10:
+                    async with session.get(url, timeout=5) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            ctx.price = float(data['price'])
+                            ctx.last_futures_update = datetime.now()
+                            # print(f"[REST] Precio actualizado via Fallback: ${ctx.price}")
+            except: pass
+            await asyncio.sleep(5)
+
+async def ws_watchdog():
+    """ 
+    Revisa si los WebSockets estan recibiendo datos. 
+    Si detecta inactividad prolongada, no podemos reiniciar las tareas facilmente 
+    desde aqui, pero podemos loguear el error y pedir un reinicio.
+    """
+    while True:
+        await asyncio.sleep(60)
+        seconds_since_update = (datetime.now() - ctx.last_futures_update).total_seconds()
+        
+        if seconds_since_update > 30:
+            print(f"[⚠️ WATCHDOG] ¡Alerta! No se reciben datos de Futuros hace {seconds_since_update:.0f}s.")
+            # En una arquitectura mas compleja aqui reiniciariamos los loops. 
+            # Por ahora el fallo de red suele disparar la excepcion en listen_trades y reconectar solo.
 
 async def listen_trades(ws_url, is_spot=False):
     """ Escucha agresiones a mercado (AggTrades) para calcular el CVD """
@@ -78,6 +111,7 @@ async def listen_trades(ws_url, is_spot=False):
                     
                     if not is_spot:
                         ctx.price = price # Actualizamos precio global con futuros
+                        ctx.last_futures_update = datetime.now()
                         if ctx.price == 0: print(f"DEBUG: Precio actualizado a {price}")
                     
                     # Logica CVD
@@ -315,6 +349,7 @@ async def main():
         listen_local_orderbook(),
         listen_liquidations(),
         fetch_oi_loop(),
+        fetch_price_fallback(),
         display_context()
     )
 
