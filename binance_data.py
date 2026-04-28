@@ -6,8 +6,9 @@ import aiohttp
 from telegram_notifier import send_telegram_message
 
 # Endpoints
-FUTURES_WS_URL = "wss://fstream.binance.com/ws"
-SPOT_WS_URL = "wss://stream.binance.com:9443/ws"
+# Endpoints (V2: Usando endpoints de flujo combinados para mayor estabilidad)
+FUTURES_WS_URL = "wss://fstream.binance.com/stream"
+SPOT_WS_URL = "wss://stream.binance.com/stream"
 SYMBOL = "btcusdt"
 
 # Market Context (Global State)
@@ -82,16 +83,19 @@ async def ws_watchdog():
 
 async def listen_trades(ws_url, is_spot=False):
     """ Escucha agresiones a mercado (AggTrades) para calcular el CVD """
-    url = f"{ws_url}/{SYMBOL}@aggTrade"
+    # Cambiamos formato a /stream?streams=... para mayor estabilidad
+    url = f"{ws_url}?streams={SYMBOL}@aggTrade"
     name = "SPOT" if is_spot else "FUTURES"
     
     while True:
         try:
-            async with websockets.connect(url) as ws:
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
                 print(f"[OK] Conectado a AggTrades ({name}) - URL: {url}")
                 while True:
                     response = await ws.recv()
-                    data = json.loads(response)
+                    raw_data = json.loads(response)
+                    data = raw_data.get('data', {}) # En /stream el objeto viene dentro de 'data'
+                    if not data: continue
                     # print(f"DEBUG {name}: {data}") # Opcional: ver todos los mensajes
                     
                     price = float(data['p'])
@@ -154,15 +158,17 @@ async def listen_local_orderbook():
             ctx.asks = {float(p): float(q) for p, q in data.get('asks', [])}
             
     # 2. Conectar al WebSocket de Updates y mantener cache
-    url = f"{FUTURES_WS_URL}/{SYMBOL}@depth@100ms"
+    url = f"{FUTURES_WS_URL}?streams={SYMBOL}@depth@100ms"
     
     while True:
         try:
-            async with websockets.connect(url) as ws:
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
                 print(f"[*] Conectado a Order Book Diff Stream (Heatmap Cache)")
                 while True:
                     response = await ws.recv()
-                    data = json.loads(response)
+                    raw_data = json.loads(response)
+                    data = raw_data.get('data', {})
+                    if not data: continue
                     
                     if data['u'] <= ctx.last_update_id:
                         continue # Descartar updates viejos
@@ -240,15 +246,17 @@ async def listen_local_orderbook():
 
 async def listen_liquidations():
     """ Escucha liquidaciones en tiempo real (Rekt Stream) """
-    url = f"{FUTURES_WS_URL}/{SYMBOL}@forceOrder"
+    url = f"{FUTURES_WS_URL}?streams={SYMBOL}@forceOrder"
     
     while True:
         try:
-            async with websockets.connect(url) as ws:
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
                 print(f"[*] Conectado a Liquidaciones (Rekt Stream)")
                 while True:
                     response = await ws.recv()
-                    data = json.loads(response)
+                    raw_data = json.loads(response)
+                    data = raw_data.get('data', {})
+                    if not data: continue
                     
                     order_data = data.get('o', {})
                     if not order_data: continue
