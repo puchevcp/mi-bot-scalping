@@ -6,7 +6,6 @@ import aiohttp
 from telegram_notifier import send_telegram_message
 
 # Endpoints
-# Endpoints (V2: Usando endpoints de flujo combinados para mayor estabilidad)
 FUTURES_WS_URL = "wss://fstream.binance.com/stream"
 SPOT_WS_URL = "wss://stream.binance.com/stream"
 SYMBOL = "btcusdt"
@@ -15,354 +14,199 @@ SYMBOL = "btcusdt"
 class MarketContext:
     def __init__(self):
         self.price = 0.0
-        
-        # Cumulative Volume Delta (CVD)
         self.spot_cvd = 0.0
         self.futures_cvd = 0.0
-        
-        # Open Interest
         self.oi_current = 0.0
         self.oi_5m_ago = 0.0
-        self.oi_history = [] # Para guardar el historico de los ultimos 5 min
-        
-        # Heatmap / Depth (Local Order Book Cache)
-        self.bids = {} # {price: qty}
+        self.oi_history = []
+        self.bids = {}
         self.asks = {}
         self.last_update_id = 0
-        
-        self.depth_0_5_delta_usd = 0.0 # Bids(0-5%) - Asks(0-5%)
-        self.heatmap_walls = [] # [(price, btc_qty, 'BID'/'ASK')]
-        
-        # Liquidations (Rekt Stream)
-        self.recent_liquidations = [] # [(timestamp, 'LONG'/'SHORT', usd_value)]
-        
-        # Volume Profile (POC)
-        self.volume_profile = {} # {rounded_price: volume_usd}
+        self.depth_0_5_delta_usd = 0.0
+        self.heatmap_walls = []
+        self.recent_liquidations = []
+        self.volume_profile = {}
         self.session_poc_price = 0.0
-        
-        # V2: Dynamic Tracking of Heatmap Limit Walls
-        self.tracked_walls = {} # {price: (btc_qty, 'BID'/'ASK')}
-        
-        # Tracking the current UTC Day to reset "Session" metrics
+        self.tracked_walls = {}
         self.current_session_day = datetime.now(timezone.utc).day
-        self.last_futures_update = datetime.now()
+        self.last_futures_msg = datetime.now()
+        self.last_spot_msg = datetime.now()
 
 ctx = MarketContext()
 
 async def fetch_price_fallback():
-    """ Si el WebSocket falla, pedimos el precio por REST cada 5 seg. """
+    """ Respaldo REST para el precio si los WS fallan. """
     url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={SYMBOL.upper()}"
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                # Solo pedimos si el precio es 0 o no se ha actualizado en 10 seg
-                if ctx.price == 0 or (datetime.now() - ctx.last_futures_update).total_seconds() > 10:
+                if ctx.price == 0 or (datetime.now() - ctx.last_futures_msg).total_seconds() > 15:
                     async with session.get(url, timeout=5) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             ctx.price = float(data['price'])
-                            ctx.last_futures_update = datetime.now()
-                            # print(f"[REST] Precio actualizado via Fallback: ${ctx.price}")
             except: pass
             await asyncio.sleep(5)
 
-async def ws_watchdog():
+async def listen_futures_combined():
     """ 
-    Revisa si los WebSockets estan recibiendo datos. 
-    Si detecta inactividad prolongada, no podemos reiniciar las tareas facilmente 
-    desde aqui, pero podemos loguear el error y pedir un reinicio.
+    CONEXIÓN MAESTRA: Escucha Trades, Depth y Liquidaciones en un solo flujo. 
+    Esto evita bloqueos de IP en Render.
     """
-    while True:
-        await asyncio.sleep(60)
-        seconds_since_update = (datetime.now() - ctx.last_futures_update).total_seconds()
-        
-        if seconds_since_update > 30:
-            print(f"[⚠️ WATCHDOG] ¡Alerta! No se reciben datos de Futuros hace {seconds_since_update:.0f}s.")
-            # En una arquitectura mas compleja aqui reiniciariamos los loops. 
-            # Por ahora el fallo de red suele disparar la excepcion en listen_trades y reconectar solo.
-
-async def listen_trades(ws_url, is_spot=False):
-    """ Escucha agresiones a mercado (AggTrades) para calcular el CVD """
-    # Cambiamos formato a /stream?streams=... para mayor estabilidad
-    url = f"{ws_url}?streams={SYMBOL}@aggTrade"
-    name = "SPOT" if is_spot else "FUTURES"
+    streams = f"{SYMBOL}@aggTrade/{SYMBOL}@depth@100ms/{SYMBOL}@forceOrder"
+    url = f"{FUTURES_WS_URL}?streams={streams}"
     
     while True:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
-                print(f"[OK] Conectado a AggTrades ({name}) - URL: {url}")
+                print(f"[OK] Conectado al Flujo Maestro de Futuros")
                 while True:
                     response = await ws.recv()
-                    raw_data = json.loads(response)
+                    raw = json.loads(response)
+                    stream = raw.get('stream', '')
+                    data = raw.get('data', {})
+                    ctx.last_futures_msg = datetime.now()
                     
-                    # Soporte dual: /stream (objeto 'data') o /ws (objeto directo)
-                    if 'data' in raw_data:
-                        data = raw_data['data']
-                    else:
-                        data = raw_data
-                    
-                    if not isinstance(data, dict) or 'p' not in data: 
-                        continue
-                    # print(f"DEBUG {name}: {data}") # Opcional: ver todos los mensajes
-                    
-                    price = float(data['p'])
-                    qty = float(data['q'])
-                    is_buyer_maker = data['m'] # True = Sell a mercado, False = Buy a mercado
-                    volume_usd = price * qty
-                    
-                    # Check for UTC Midnight Reset (New Session)
-                    now_utc = datetime.now(timezone.utc)
-                    if now_utc.day != ctx.current_session_day:
-                        ctx.spot_cvd = 0.0
-                        ctx.futures_cvd = 0.0
-                        ctx.volume_profile.clear()
-                        ctx.session_poc_price = 0.0
-                        ctx.current_session_day = now_utc.day
-                        print(f"🔄 [+00:00 UTC] Sesión reseteada (CVD, POC y Perfil de Volumen limpios).")
-                    
-                    if not is_spot:
-                        ctx.price = price # Actualizamos precio global con futuros
-                        ctx.last_futures_update = datetime.now()
-                        if ctx.price == 0: print(f"DEBUG: Precio actualizado a {price}")
-                    
-                    # Logica CVD
-                    if is_buyer_maker: # Venta
-                        if is_spot: ctx.spot_cvd -= volume_usd
-                        else: ctx.futures_cvd -= volume_usd
-                    else:              # Compra
-                        if is_spot: ctx.spot_cvd += volume_usd
+                    # 1. TRADES (CVD & POC)
+                    if "@aggTrade" in stream:
+                        price = float(data['p'])
+                        qty = float(data['q'])
+                        is_buyer_maker = data['m']
+                        volume_usd = price * qty
+                        
+                        # Reset Diario
+                        now_utc = datetime.now(timezone.utc)
+                        if now_utc.day != ctx.current_session_day:
+                            ctx.futures_cvd = 0.0
+                            ctx.spot_cvd = 0.0
+                            ctx.volume_profile.clear()
+                            ctx.current_session_day = now_utc.day
+                        
+                        ctx.price = price
+                        if is_buyer_maker: ctx.futures_cvd -= volume_usd
                         else: ctx.futures_cvd += volume_usd
                         
-                    # Volume Profile (Solo usamos futuros para el POC)
-                    if not is_spot:
-                        rounded_price = round(price / 50) * 50 # Agrupamos perfil de volumen cada $50
-                        ctx.volume_profile[rounded_price] = ctx.volume_profile.get(rounded_price, 0) + volume_usd
-                        # Actualizar POC (Point of Control)
+                        # Volume Profile & POC
+                        rounded = round(price / 50) * 50
+                        ctx.volume_profile[rounded] = ctx.volume_profile.get(rounded, 0) + volume_usd
                         if ctx.volume_profile:
                             ctx.session_poc_price = max(ctx.volume_profile, key=ctx.volume_profile.get)
+
+                    # 2. DEPTH (Orderbook & Heatmap)
+                    elif "@depth" in stream:
+                        if data.get('u', 0) <= ctx.last_update_id: continue
+                        for p_str, q_str in data.get('b', []):
+                            p, q = float(p_str), float(q_str)
+                            if q == 0.0: ctx.bids.pop(p, None)
+                            else: ctx.bids[p] = q
+                        for p_str, q_str in data.get('a', []):
+                            p, q = float(p_str), float(q_str)
+                            if q == 0.0: ctx.asks.pop(p, None)
+                            else: ctx.asks[p] = q
+                        ctx.last_update_id = data['u']
                         
-                    # Mantenemos las alertas de super ballenas en futuros (Ajustado a >$4M)
-                    if not is_spot and volume_usd >= 4000000:
-                        trade_dir = "VENTA \U0001f534" if is_buyer_maker else "COMPRA \U0001f7e2"
-                        # V2: Deshabilitadas las alertas directas a Telegram por Market Orders para usar Muros Dinamicos.
-                        pass
-                        
+                        # Recalcular Heatmap cada X mensajes
+                        if data['u'] % 10 == 0 and ctx.price > 0:
+                            # 0-5% Delta
+                            l5_bid, l5_ask = ctx.price * 0.95, ctx.price * 1.05
+                            b5 = sum(p*q for p,q in ctx.bids.items() if p >= l5_bid)
+                            a5 = sum(p*q for p,q in ctx.asks.items() if p <= l5_ask)
+                            ctx.depth_0_5_delta_usd = b5 - a5
+                            
+                            # Muros (Threshold 400 BTC)
+                            walls = []
+                            for p, q in ctx.bids.items():
+                                if q >= 400 and p >= l5_bid: walls.append((p, q, 'BID (Soporte)'))
+                            for p, q in ctx.asks.items():
+                                if q >= 400 and p <= l5_ask: walls.append((p, q, 'ASK (Resistencia)'))
+                            ctx.heatmap_walls = sorted(walls, key=lambda x: x[1], reverse=True)
+
+                    # 3. LIQUIDATIONS
+                    elif "@forceOrder" in stream:
+                        order = data.get('o', {})
+                        side = "LONG" if order.get('S') == "SELL" else "SHORT"
+                        val = float(order.get('p', 0)) * float(order.get('q', 0))
+                        ctx.recent_liquidations.append((datetime.now(), side, val))
+                        # Limpiar viejas (>15m)
+                        cutoff = datetime.now().timestamp() - 900
+                        ctx.recent_liquidations = [x for x in ctx.recent_liquidations if x[0].timestamp() > cutoff]
+
         except Exception as e:
-            print(f"[!] Error en trades WS {name}: {e}. Reconectando...")
+            print(f"[!] Error en Flujo Maestro Futuros: {e}. Reconectando...")
             await asyncio.sleep(2)
 
-async def listen_local_orderbook():
-    """ Construye y mantiene un Cache Local del Order Book para Kiyotaka Heatmap """
-    
-    # 1. Obtener REST Snapshot (1000 niveles) usando endpoint oficial
-    snapshot_url = f"https://fapi.binance.com/fapi/v1/depth?symbol={SYMBOL.upper()}&limit=1000"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(snapshot_url) as resp:
-            data = await resp.json()
-            ctx.last_update_id = data.get('lastUpdateId', 0)
-            
-            ctx.bids = {float(p): float(q) for p, q in data.get('bids', [])}
-            ctx.asks = {float(p): float(q) for p, q in data.get('asks', [])}
-            
-    # 2. Conectar al WebSocket de Updates y mantener cache
-    url = f"{FUTURES_WS_URL}?streams={SYMBOL}@depth@100ms"
-    
+async def listen_spot_combined():
+    """ Unifica flujo de Spot para mayor estabilidad. """
+    url = f"{SPOT_WS_URL}?streams={SYMBOL}@aggTrade"
     while True:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
-                print(f"[*] Conectado a Order Book Diff Stream (Heatmap Cache)")
+                print(f"[OK] Conectado al Flujo Maestro Spot")
                 while True:
                     response = await ws.recv()
-                    raw_data = json.loads(response)
-                    data = raw_data.get('data', raw_data)
-                    if not isinstance(data, dict): continue
+                    raw = json.loads(response)
+                    data = raw.get('data', {})
+                    ctx.last_spot_msg = datetime.now()
                     
-                    if data['u'] <= ctx.last_update_id:
-                        continue # Descartar updates viejos
-                        
-                    # Aplicar Diff (Si qty es 0.00, se borra el nivel)
-                    for p_str, q_str in data.get('b', []):
-                        p, q = float(p_str), float(q_str)
-                        if q == 0.0: ctx.bids.pop(p, None)
-                        else: ctx.bids[p] = q
-                        
-                    for p_str, q_str in data.get('a', []):
-                        p, q = float(p_str), float(q_str)
-                        if q == 0.0: ctx.asks.pop(p, None)
-                        else: ctx.asks[p] = q
-                        
-                    ctx.last_update_id = data['u']
-                    
-                    # --- Calcular Heatmap Data una vez por segundo (aprox cada 10 mensajes) ---
-                    if (data['u'] % 5) == 0 and ctx.price > 0:
-                        # Limpiar precios muy lejanos para no saturar RAM
-                        min_p, max_p = ctx.price * 0.90, ctx.price * 1.10
-                        ctx.bids = {p: q for p, q in ctx.bids.items() if p > min_p}
-                        ctx.asks = {p: q for p, q in ctx.asks.items() if p < max_p}
-                        
-                        # 0-5% Depth Delta
-                        limit_bid_5 = ctx.price * 0.95
-                        limit_ask_5 = ctx.price * 1.05
-                        
-                        bids_5_sum = sum(p * q for p, q in ctx.bids.items() if p >= limit_bid_5)
-                        asks_5_sum = sum(p * q for p, q in ctx.asks.items() if p <= limit_ask_5)
-                        ctx.depth_0_5_delta_usd = bids_5_sum - asks_5_sum
-                        
-                        # Buscar Muros (Whales en Límite) > 400 BTC (V2: 400 BTC threshold)
-                        walls = []
-                        for p, q in ctx.bids.items():
-                            if q >= 400 and p >= limit_bid_5:
-                                walls.append((p, q, 'BID (Soporte)'))
-                        for p, q in ctx.asks.items():
-                            if q >= 400 and p <= limit_ask_5:
-                                walls.append((p, q, 'ASK (Resistencia)'))
-                                
-                        ctx.heatmap_walls = sorted(walls, key=lambda x: x[1], reverse=True) # Sort by amount
-                        
-                        # V2: Rastreo dinamico de muros
-                        current_wall_prices = set()
-                        for p, q, w_type in ctx.heatmap_walls:
-                            current_wall_prices.add(p)
-                            if p not in ctx.tracked_walls:
-                                # ¡Muro nuevo detectado!
-                                ctx.tracked_walls[p] = (q, w_type)
-                                try:
-                                    asyncio.create_task(send_telegram_message(f"🚨 <b>¡NUEVO MURO DETECTADO!</b>\n{q:,.0f} BTC Limit en ${p:,.2f} ({w_type})"))
-                                except Exception: pass
-                            else:
-                                ctx.tracked_walls[p] = (q, w_type) # Actualizar tamano
-                                
-                        # Revisar Muros removidos o consumidos
-                        for p in list(ctx.tracked_walls.keys()):
-                            if p not in current_wall_prices:
-                                old_q, w_type = ctx.tracked_walls[p]
-                                # Revisar tamano real actual
-                                actual_q = ctx.bids.get(p, 0) if "BID" in w_type else ctx.asks.get(p, 0)
-                                
-                                if actual_q < 100: # Si bajo a menos de 100 BTC, consideramos que se esfumo o se ejecuto
-                                    # Solo avisamos si el precio sigue relativamente cerca (distancia 6%)
-                                    distancia = abs(ctx.price - p) / ctx.price
-                                    if distancia <= 0.06:
-                                        try:
-                                            asyncio.create_task(send_telegram_message(f"👻 <b>¡MURO ELIMINADO/CONSUMIDO!</b>\nEl muro de ${p:,.2f} ({w_type}) ha desaparecido. (Restante: {actual_q:,.0f} BTC)"))
-                                        except Exception: pass
-                                    del ctx.tracked_walls[p]
-
-        except Exception as e:
-            await asyncio.sleep(2)
-
-async def listen_liquidations():
-    """ Escucha liquidaciones en tiempo real (Rekt Stream) """
-    url = f"{FUTURES_WS_URL}?streams={SYMBOL}@forceOrder"
-    
-    while True:
-        try:
-            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
-                print(f"[*] Conectado a Liquidaciones (Rekt Stream)")
-                while True:
-                    response = await ws.recv()
-                    raw_data = json.loads(response)
-                    data = raw_data.get('data', raw_data)
-                    if not isinstance(data, dict): continue
-                    
-                    order_data = data.get('o', {})
-                    if not order_data: continue
-                    
-                    side = order_data.get('S') # Si es SELL, fue un Long liquidado. Si es BUY, fue un Short liquidado.
-                    liq_type = "LONG" if side == "SELL" else "SHORT"
-                    
-                    price = float(order_data.get('p', 0))
-                    qty = float(order_data.get('q', 0))
-                    volume_usd = price * qty
-                    
-                    now = datetime.now()
-                    ctx.recent_liquidations.append((now, liq_type, volume_usd))
-                    
-                    # Limpiar historial viejo de liquidaciones (> 15 mins)
-                    cutoff = now.timestamp() - 900
-                    ctx.recent_liquidations = [(t, l, v) for t, l, v in ctx.recent_liquidations if t.timestamp() > cutoff]
-                    
+                    if 'p' in data:
+                        p, q = float(data['p']), float(data['q'])
+                        vol = p * q
+                        if data['m']: ctx.spot_cvd -= vol
+                        else: ctx.spot_cvd += vol
         except Exception as e:
             await asyncio.sleep(2)
 
 async def fetch_oi_loop():
-    """ Consulta el Open Interest via REST periodicamente para ver la variacion """
     url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={SYMBOL.upper()}"
-    
     async with aiohttp.ClientSession() as session:
         while True:
             try:
                 async with session.get(url) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        current_oi = float(data.get('openInterest', 0))
-                        
-                        # Actualizar estado e historial
-                        ctx.oi_current = current_oi
+                        val = float(data.get('openInterest', 0))
+                        ctx.oi_current = val
                         now = datetime.now()
-                        ctx.oi_history.append((now, current_oi))
-                        
-                        # Limpiar historial viejo (> 5 mins) y obtener el oi_5m_ago
+                        ctx.oi_history.append((now, val))
                         cutoff = now.timestamp() - 300
-                        ctx.oi_history = [(t, v) for t, v in ctx.oi_history if t.timestamp() > cutoff]
-                        if ctx.oi_history:
-                            ctx.oi_5m_ago = ctx.oi_history[0][1] # El elemento mas antiguo en la ventana de 5m
-            except Exception as e:
-                pass
-            await asyncio.sleep(5) # Evitar rate limits
+                        ctx.oi_history = [x for x in ctx.oi_history if x[0].timestamp() > cutoff]
+                        if ctx.oi_history: ctx.oi_5m_ago = ctx.oi_history[0][1]
+            except: pass
+            await asyncio.sleep(5)
 
 async def display_context():
-    """ Muestra la matriz de informacion completa en consola """
-    print("\n" + "="*50)
-    print("HIGH-PROBABILITY MARKET CONTEXT ENGINE")
-    print("="*50)
-    
     while True:
         await asyncio.sleep(3)
         now = datetime.now().strftime("%H:%M:%S")
+        oi_pct = ((ctx.oi_current - ctx.oi_5m_ago) / ctx.oi_5m_ago * 100) if ctx.oi_5m_ago > 0 else 0
         
-        # Calcular delta de OI
-        oi_delta_pct = 0.0
-        if ctx.oi_5m_ago > 0:
-            oi_delta_pct = ((ctx.oi_current - ctx.oi_5m_ago) / ctx.oi_5m_ago) * 100
-        
-        # Formatos de color
-        s_cvd_color = "\033[92m" if ctx.spot_cvd > 0 else "\033[91m"
-        f_cvd_color = "\033[92m" if ctx.futures_cvd > 0 else "\033[91m"
-        oi_color = "\033[92m" if oi_delta_pct > 0 else "\033[91m"
+        c_spot = "\033[92m" if ctx.spot_cvd > 0 else "\033[91m"
+        c_fut = "\033[92m" if ctx.futures_cvd > 0 else "\033[91m"
         reset = "\033[0m"
         
-        # Order Book (Heatmap)
-        delta_color = "\033[92m" if ctx.depth_0_5_delta_usd > 0 else "\033[91m"
-        
-        wall_str = "Ninguno"
-        if ctx.heatmap_walls:
-            best_wall = ctx.heatmap_walls[0]
-            wall_str = f"{best_wall[1]:.0f} BTC en ${best_wall[0]:,.0f} ({best_wall[2]})"
-        
-        # Liquidaciones Recientes
-        long_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "LONG")
-        short_liqs = sum(v for t, l, v in ctx.recent_liquidations if l == "SHORT")
-        
-        # Relacion al POC
-        poc_status = "Neutral"
-        if ctx.price > ctx.session_poc_price > 0: poc_status = "Sobre el POC (Alcista)"
-        elif ctx.price < ctx.session_poc_price > 0: poc_status = "Bajo el POC (Bajista)"
-        
-        print(f"\n[{now}] PRECIO BTC: ${ctx.price:,.2f} | POC Sesion: ${ctx.session_poc_price:,.2f} ({poc_status})")
-        print(f"|- CVD Spot   : {s_cvd_color}${ctx.spot_cvd:,.0f}{reset}")
-        print(f"|- CVD Futuros: {f_cvd_color}${ctx.futures_cvd:,.0f}{reset}")
-        print(f"|- Open I.(5m): {oi_color}{ctx.oi_current:,.2f} BTC ({oi_delta_pct:+.3f}%){reset}")
-        print(f"|- Delta 0-5% : {delta_color}${ctx.depth_0_5_delta_usd:,.0f}{reset}")
-        print(f"|- [W] MURO 500+: {wall_str}")
-        print(f"`- Liqs (15m) : Longs liquidados: ${long_liqs:,.0f} | Shorts liquidados: ${short_liqs:,.0f}")
+        best_wall = f"{ctx.heatmap_walls[0][1]:.0f} BTC en ${ctx.heatmap_walls[0][0]:,.0f}" if ctx.heatmap_walls else "Ninguno"
+        l_sum = sum(v for t,s,v in ctx.recent_liquidations if s=="LONG")
+        s_sum = sum(v for t,s,v in ctx.recent_liquidations if s=="SHORT")
+
+        print(f"\n[{now}] PRECIO: ${ctx.price:,.2f} | POC: ${ctx.session_poc_price:,.2f}")
+        print(f"|- CVD Spot: {c_spot}${ctx.spot_cvd:,.0f}{reset} | Fut: {c_fut}${ctx.futures_cvd:,.0f}{reset}")
+        print(f"|- OI: {ctx.oi_current:,.2f} BTC ({oi_pct:+.3f}%) | Delta 5%: ${ctx.depth_0_5_delta_usd:,.0f}")
+        print(f"|- Muro: {best_wall} | Liqs: L:${l_sum:,.0f} S:${s_sum:,.0f}")
 
 async def main():
+    # Cargar snapshot del orderbook al inicio
+    url = f"https://fapi.binance.com/fapi/v1/depth?symbol={SYMBOL.upper()}&limit=1000"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                ctx.last_update_id = data.get('lastUpdateId', 0)
+                ctx.bids = {float(p): float(q) for p, q in data.get('bids', [])}
+                ctx.asks = {float(p): float(q) for p, q in data.get('asks', [])}
+
     await asyncio.gather(
-        listen_trades(SPOT_WS_URL, is_spot=True),
-        listen_trades(FUTURES_WS_URL, is_spot=False),
-        listen_local_orderbook(),
-        listen_liquidations(),
+        listen_futures_combined(),
+        listen_spot_combined(),
         fetch_oi_loop(),
         fetch_price_fallback(),
         display_context()
@@ -372,7 +216,4 @@ if __name__ == "__main__":
     import platform
     if platform.system() == 'Windows':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nMotor detenido.")
+    asyncio.run(main())
