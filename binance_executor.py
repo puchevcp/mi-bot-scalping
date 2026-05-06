@@ -329,7 +329,16 @@ async def process_signal(signal_data: dict) -> dict:
                 quantity=qty
             )
             # En Market, la ejecución puede ser en varios fills; tomamos el precio del ticket
-            exec_price = float(order.get("avgPrice", current_price))
+            # Parche: Si avgPrice es 0 o nulo, usamos el current_price (ticker) como respaldo
+            raw_avg_price = float(order.get("avgPrice", 0))
+            exec_price = raw_avg_price if raw_avg_price > 0 else current_price
+            
+            if exec_price <= 0:
+                # Si aun asi es 0, no podemos calcular SL/TP con seguridad
+                log.error("No se pudo obtener un precio de ejecucion valido para SL/TP.")
+                if not DRY_RUN: await client.close_connection()
+                return {"status": "error", "reason": "invalid_execution_price"}
+
             log.info(f"Tramo 1 MARKET ejecutado: {order['orderId']} @ {exec_price}")
         except BinanceAPIException as e:
             log.error(f"Error colocando MARKET: {e}")
