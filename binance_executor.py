@@ -171,8 +171,9 @@ async def _get_symbol_info(client, symbol):
 
 
 def _round_price(price, tick_size):
-    decimals = max(0, -int(math.floor(math.log10(tick_size))))
-    return round(price, decimals)
+    """Redondea el precio al multiplo exacto del tick_size permitido por Binance."""
+    precision = int(round(-math.log10(tick_size), 0))
+    return round(math.floor(price / tick_size) * tick_size, precision)
 
 
 def _round_qty(qty, step_size):
@@ -204,22 +205,37 @@ async def _place_sl_tp(client, symbol, side, quantity, entry_price, sl_pct, tp_p
         log.info(f"[DRY_RUN] SL @ {sl_price} | TP @ {tp_price} (Cantidad: {quantity})")
         return {"sl_id": "dry_sl", "tp_id": "dry_tp", "sl_price": sl_price, "tp_price": tp_price}
 
-    sl_order = await client.futures_create_order(
-        symbol=symbol,
-        side=close_side,
-        type="STOP_MARKET",
-        stopPrice=sl_price,
-        closePosition=True
-    )
-    tp_order = await client.futures_create_order(
-        symbol=symbol,
-        side=close_side,
-        type="TAKE_PROFIT_MARKET",
-        stopPrice=tp_price,
-        closePosition=True
-    )
-    log.info(f"SL colocado @ {sl_price} | TP colocado @ {tp_price}")
-    return {"sl_id": sl_order["orderId"], "tp_id": tp_order["orderId"], "sl_price": sl_price, "tp_price": tp_price}
+    # Intentar colocar SL
+    sl_id = "error_sl"
+    try:
+        sl_order = await client.futures_create_order(
+            symbol=symbol,
+            side=close_side,
+            type="STOP_MARKET",
+            stopPrice=sl_price,
+            closePosition=True
+        )
+        sl_id = sl_order["orderId"]
+        log.info(f"🛡️ SL colocado con exito @ {sl_price}")
+    except Exception as e:
+        log.error(f"❌ Error colocando Stop Loss: {e}")
+
+    # Intentar colocar TP
+    tp_id = "error_tp"
+    try:
+        tp_order = await client.futures_create_order(
+            symbol=symbol,
+            side=close_side,
+            type="TAKE_PROFIT_MARKET",
+            stopPrice=tp_price,
+            closePosition=True
+        )
+        tp_id = tp_order["orderId"]
+        log.info(f"🎯 TP colocado con exito @ {tp_price}")
+    except Exception as e:
+        log.error(f"❌ Error colocando Take Profit: {e}")
+
+    return {"sl_id": sl_id, "tp_id": tp_id, "sl_price": sl_price, "tp_price": tp_price}
 
 
 async def _cancel_open_sl_tp(client, symbol, position):
