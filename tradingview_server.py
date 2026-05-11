@@ -411,8 +411,9 @@ async def receive_webhook(request: Request):
         asyncio.create_task(send_telegram_message(msg_telegram))
         
         # --- INTEGRACIÓN BINANCE: EJECUCIÓN AUTOMÁTICA ---
-        # A pedido del usuario: Ejecutar TODAS las señales (Score >= 1) para recolectar datos en 15m
-        if total_score >= 1 or is_platinum:
+        # A pedido del usuario: Ejecutar solo señales MEDIA o ALTA (Score >= 5)
+        # Las de BAJA (Score < 5) se loguean en el diario pero NO se operan en Binance.
+        if total_score >= 5 or is_platinum:
             # CORRECCIÓN: El executor espera "BUY"/"SELL", no "COMPRA"/"VENTA"
             binance_side = "BUY" if is_buy_signal else "SELL"
             binance_data = {
