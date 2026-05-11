@@ -49,9 +49,36 @@ RISK_PER_TRANCHE = float(os.getenv("RISK_PER_TRANCHE", "0.005"))  # 0.5%
 MAX_TRANCHES    = int(os.getenv("MAX_TRANCHES", "2"))
 SL_PCT          = float(os.getenv("STOP_LOSS_PCT", "0.0025"))     # 0.25%
 TP_FALLBACK_PCT = float(os.getenv("TAKE_PROFIT_PCT", "0.0075"))   # 0.75%
-HOUR_START      = int(os.getenv("TRADING_HOUR_START", "9"))
-HOUR_END        = int(os.getenv("TRADING_HOUR_END", "20"))
-UTC_OFFSET      = -3  # UTC-3
+UTC_OFFSET      = -3  # UTC-3 (Argentina)
+
+# ============================================================
+# BLACKOUT WINDOWS (Horario Argentina, UTC-3)
+# ============================================================
+# Basado en analisis estadistico de 764 trades reales del trades_journal.csv
+# (Auditoria realizada el 11/05/2026)
+#
+# VENTANAS BLOQUEADAS POR MAL RENDIMIENTO:
+#
+# [1] 05:00 - 09:00 ARG  | Asia pre-Londres
+#     Win Rate: 21-32%  | PnL promedio: -0.038% a -0.055%
+#     Motivo: Mercado asiatico con baja liquidez y movimientos erraticos
+#             antes de la apertura de Londres. Muchos fakeouts.
+#
+# [2] 20:00 - 21:00 ARG  | Cierre de NY (la PEOR hora del dia)
+#     Win Rate: 23.5%   | PnL promedio: -0.102%
+#     Motivo: El cierre de NY genera reversiones bruscas y stop hunts.
+#             Las velas de 15m de las 20hs son las menos confiables.
+#
+# MEJORES HORARIOS (para referencia):
+#   02:00 ARG: WR 60%  | +0.107% prom  (Asia activa)
+#   17:00 ARG: WR 54%  | +0.087% prom  (NY en plena marcha)
+#   18:00 ARG: WR 55%  | +0.078% prom  (NY en plena marcha)
+#
+# Para modificar estos rangos, editar BLACKOUT_WINDOWS abajo.
+BLACKOUT_WINDOWS = [
+    (5, 9),    # 05:00 - 08:59 ARG: Asia pre-Londres (WR 21-32%, PnL negativo)
+    (20, 21),  # 20:00 - 20:59 ARG: Cierre NY, peor hora del dia (WR 23.5%, -0.102%)
+]
 
 # ============================================================
 # LOGGING
@@ -86,10 +113,24 @@ async def _get_client():
 
 
 def _is_trading_hours():
-    """Verifica si estamos dentro del horario configurado (UTC-3)."""
+    """
+    Verifica que no estemos en una ventana de bloqueo horario (Blackout Window).
+    Opera 24/7 excepto en los rangos con mal rendimiento estadistico comprobado.
+    Ver BLACKOUT_WINDOWS arriba para el detalle y justificacion de cada bloqueo.
+    """
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc + timedelta(hours=UTC_OFFSET)
-    return HOUR_START <= now_local.hour < HOUR_END
+    current_hour = now_local.hour
+
+    for (start, end) in BLACKOUT_WINDOWS:
+        if start <= current_hour < end:
+            log.info(
+                f"[BLACKOUT] Hora {current_hour:02d}:00 ARG bloqueada "
+                f"(ventana {start:02d}:00-{end:02d}:00). "
+                f"Ver BLACKOUT_WINDOWS en binance_executor.py para el motivo."
+            )
+            return False
+    return True
 
 
 async def _get_balance(client):

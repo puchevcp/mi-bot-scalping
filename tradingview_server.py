@@ -413,9 +413,11 @@ async def receive_webhook(request: Request):
         # --- INTEGRACIÓN BINANCE: EJECUCIÓN AUTOMÁTICA ---
         # A pedido del usuario: Ejecutar TODAS las señales (Score >= 1) para recolectar datos en 15m
         if total_score >= 1 or is_platinum:
+            # CORRECCIÓN: El executor espera "BUY"/"SELL", no "COMPRA"/"VENTA"
+            binance_side = "BUY" if is_buy_signal else "SELL"
             binance_data = {
                 "symbol": SYMBOL.upper(),
-                "side": s_action,
+                "side": binance_side,
                 "verdict": ver_name,
                 "tp_pct": tp3_pct / 100, # Usamos el Moon Target para la automatización
                 "sl_pct": sl_pct / 100,
@@ -423,7 +425,7 @@ async def receive_webhook(request: Request):
             }
             # Lanzamos la ejecución en segundo plano
             asyncio.create_task(process_signal(binance_data))
-            print(f"[*] Señal enviada a Binance Executor: {SYMBOL} {s_action}")
+            print(f"[*] Señal enviada a Binance Executor: {SYMBOL} {binance_side}")
 
         return {"status": "success", "verdict": verdict}
     except Exception as e:
