@@ -470,16 +470,17 @@ async def close_position(symbol: str, reason: str = "manual"):
 
 async def check_real_exits():
     """
-    Monitor de Seguridad:
-    1. Detecta si una posicion se cerro en Binance para liberarla en memoria.
-    2. DETECTA POSICIONES SIN SL Y LAS PROTEGE AUTOMATICAMENTE.
+    Monitor de Seguridad (corre cada 60 segundos).
+    Crea un cliente fresco en cada ciclo para evitar errores de sesion cerrada.
+    1. Detecta posiciones sin SL o TP y las protege automaticamente.
+    2. Libera en memoria posiciones que ya no existen en Binance (TP/SL Hit).
     """
-    client = await _get_client()
-    if not client: return
-    
     while True:
+        await asyncio.sleep(60)
+        monitor_client = None
         try:
-            acc_info = await client.futures_account()
+            monitor_client = await AsyncClient.create(API_KEY, API_SECRET, testnet=USE_TESTNET)
+            acc_info = await monitor_client.futures_account()
             positions = acc_info.get('positions', [])
             
             real_open_symbols = set()
@@ -489,44 +490,58 @@ async def check_real_exits():
                     symbol = p['symbol']
                     real_open_symbols.add(symbol)
                     
-                    # --- SEGURIDAD EXTRA: VERIFICAR SL Y TP ---
-                    orders = await client.futures_get_open_orders(symbol=symbol)
+                    orders = await monitor_client.futures_get_open_orders(symbol=symbol)
                     has_sl = any(o['type'] in ['STOP_MARKET', 'STOP'] for o in orders)
-                    has_tp = any(o['type'] in ['TAKE_PROFIT_MARKET', 'TAKE_PROFIT', 'LIMIT'] for o in orders)
+                    has_tp = any(o['type'] in ['TAKE_PROFIT_MARKET', 'TAKE_PROFIT'] for o in orders)
                     
-                    side = "SELL" if amt > 0 else "BUY"
+                    close_side = "SELL" if amt > 0 else "BUY"
                     entry_price = float(p['entryPrice'])
-                    tick_size = 0.1 
-                    
+                    tick_size = 0.1
+
                     if not has_sl:
-                        log.warning(f"⚠️ [SEGURIDAD] ¡Posicion en {symbol} SIN STOP LOSS! Colocando emergencia...")
-                        sl_price = _round_price(entry_price * (1 - 0.0025) if amt > 0 else entry_price * (1 + 0.0025), tick_size)
+                        log.warning(f"[SEGURIDAD] {symbol} SIN STOP LOSS. Colocando emergencia...")
+                        sl_price = _round_price(
+                            entry_price * (1 - 0.0025) if amt > 0 else entry_price * (1 + 0.0025),
+                            tick_size
+                        )
                         try:
-                            await client.futures_create_order(symbol=symbol, side=side, type="STOP_MARKET", stopPrice=sl_price, closePosition=True)
-                            log.info(f"✅ [SEGURIDAD] Stop Loss colocado en {sl_price}")
-                        except Exception as e: log.error(f"❌ Error SL emergencia: {e}")
+                            await monitor_client.futures_create_order(
+                                symbol=symbol, side=close_side,
+                                type="STOP_MARKET", stopPrice=sl_price, closePosition=True
+                            )
+                            log.info(f"[SEGURIDAD] Stop Loss colocado en {sl_price}")
+                        except Exception as e:
+                            log.error(f"[SEGURIDAD] Error SL: {e}")
 
                     if not has_tp:
-                        log.warning(f"🎯 [SEGURIDAD] ¡Posicion en {symbol} SIN TAKE PROFIT! Colocando emergencia...")
-                        tp_price = _round_price(entry_price * (1 + 0.0075) if amt > 0 else entry_price * (1 - 0.0075), tick_size)
+                        log.warning(f"[SEGURIDAD] {symbol} SIN TAKE PROFIT. Colocando emergencia...")
+                        tp_price = _round_price(
+                            entry_price * (1 + 0.0075) if amt > 0 else entry_price * (1 - 0.0075),
+                            tick_size
+                        )
                         try:
-                            await client.futures_create_order(symbol=symbol, side=side, type="TAKE_PROFIT_MARKET", stopPrice=tp_price, closePosition=True)
-                            log.info(f"✅ [SEGURIDAD] Take Profit colocado en {tp_price}")
-                        except Exception as e: log.error(f"❌ Error TP emergencia: {e}")
-            
-            # Limpiar memoria si la posicion ya no existe en Binance
-            symbols_to_close = []
-            for symbol in active_positions.keys():
-                if symbol not in real_open_symbols:
-                    symbols_to_close.append(symbol)
-            
+                            await monitor_client.futures_create_order(
+                                symbol=symbol, side=close_side,
+                                type="TAKE_PROFIT_MARKET", stopPrice=tp_price, closePosition=True
+                            )
+                            log.info(f"[SEGURIDAD] Take Profit colocado en {tp_price}")
+                        except Exception as e:
+                            log.error(f"[SEGURIDAD] Error TP: {e}")
+
+            symbols_to_close = [s for s in active_positions if s not in real_open_symbols]
             for sym in symbols_to_close:
                 await close_position(sym, reason="TP/SL Hit o Cierre Externo")
-                
+
         except Exception as e:
             log.error(f"Error en monitor de seguridad: {e}")
-            
-        await asyncio.sleep(60)
+        finally:
+            if monitor_client:
+                try:
+                    await monitor_client.close_connection()
+                except Exception:
+                    pass
+
+
 
 
 def status():
