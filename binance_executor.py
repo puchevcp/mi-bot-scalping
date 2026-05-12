@@ -220,10 +220,12 @@ async def _place_sl_tp(client, symbol, side, quantity, entry_price, sl_pct, tp_p
         sl_order = await client.futures_create_order(
             symbol=symbol,
             side=close_side,
-            type="STOP_MARKET",
+            type="STOP",
             stopPrice=sl_price,
+            price=sl_price,
             quantity=quantity,
-            reduceOnly=True
+            reduceOnly=True,
+            timeInForce="GTC"
         )
         sl_id = sl_order["orderId"]
         log.info(f"SL colocado con exito @ {sl_price}")
@@ -236,10 +238,12 @@ async def _place_sl_tp(client, symbol, side, quantity, entry_price, sl_pct, tp_p
         tp_order = await client.futures_create_order(
             symbol=symbol,
             side=close_side,
-            type="TAKE_PROFIT_MARKET",
+            type="TAKE_PROFIT",
             stopPrice=tp_price,
+            price=tp_price,
             quantity=quantity,
-            reduceOnly=True
+            reduceOnly=True,
+            timeInForce="GTC"
         )
         tp_id = tp_order["orderId"]
         log.info(f"TP colocado con exito @ {tp_price}")
@@ -509,8 +513,8 @@ async def check_real_exits():
                         try:
                             await monitor_client.futures_create_order(
                                 symbol=symbol, side=close_side,
-                                type="STOP_MARKET", stopPrice=sl_price,
-                                quantity=abs(amt), reduceOnly=True
+                                type="STOP", stopPrice=sl_price, price=sl_price,
+                                quantity=abs(amt), reduceOnly=True, timeInForce="GTC"
                             )
                             log.info(f"[SEGURIDAD] Stop Loss colocado en {sl_price}")
                         except Exception as e:
@@ -525,8 +529,8 @@ async def check_real_exits():
                         try:
                             await monitor_client.futures_create_order(
                                 symbol=symbol, side=close_side,
-                                type="TAKE_PROFIT_MARKET", stopPrice=tp_price,
-                                quantity=abs(amt), reduceOnly=True
+                                type="TAKE_PROFIT", stopPrice=tp_price, price=tp_price,
+                                quantity=abs(amt), reduceOnly=True, timeInForce="GTC"
                             )
                             log.info(f"[SEGURIDAD] Take Profit colocado en {tp_price}")
                         except Exception as e:
