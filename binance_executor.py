@@ -485,7 +485,6 @@ async def check_real_exits():
     TP_PCT = 0.0075  # 0.75% Take Profit
 
     while True:
-        await asyncio.sleep(60)
         monitor_client = None
         try:
             monitor_client = await AsyncClient.create(API_KEY, API_SECRET, testnet=USE_TESTNET)
@@ -504,7 +503,7 @@ async def check_real_exits():
                 is_long = amt > 0
                 close_side = "SELL" if is_long else "BUY"
 
-                # Calcular niveles de SL y TP desde el precio de entrada
+                # Calcular niveles de SL y TP
                 if is_long:
                     sl_level = entry_price * (1 - SL_PCT)
                     tp_level = entry_price * (1 + TP_PCT)
@@ -512,51 +511,45 @@ async def check_real_exits():
                     sl_level = entry_price * (1 + SL_PCT)
                     tp_level = entry_price * (1 - TP_PCT)
 
-                # Obtener precio actual del mercado
+                # Obtener precio actual
                 ticker = await monitor_client.futures_symbol_ticker(symbol=symbol)
                 current_price = float(ticker['price'])
 
-                log.info(
-                    f"[MONITOR] {symbol} | Entrada: {entry_price:.2f} | "
-                    f"Actual: {current_price:.2f} | SL: {sl_level:.2f} | TP: {tp_level:.2f}"
-                )
-
-                # --- Verificar si se tocó el SL ---
+                # --- Verificar SL ---
                 sl_hit = (is_long and current_price <= sl_level) or \
                          (not is_long and current_price >= sl_level)
 
-                # --- Verificar si se tocó el TP ---
+                # --- Verificar TP ---
                 tp_hit = (is_long and current_price >= tp_level) or \
                          (not is_long and current_price <= tp_level)
 
                 if sl_hit or tp_hit:
                     reason = "SL" if sl_hit else "TP"
-                    log.warning(f"[MONITOR] {symbol} | {reason} ALCANZADO @ {current_price:.2f}. Cerrando con MARKET...")
+                    log.warning(f"⚠️ [MONITOR] {symbol} | {reason} ALCANZADO @ {current_price:.2f}. Cerrando...")
                     try:
                         await monitor_client.futures_create_order(
-                            symbol=symbol,
-                            side=close_side,
-                            type="MARKET",
-                            quantity=abs(amt)
+                            symbol=symbol, side=close_side, type="MARKET", quantity=abs(amt)
                         )
-                        log.info(f"[MONITOR] Posicion {symbol} cerrada por {reason} @ {current_price:.2f}")
+                        log.info(f"✅ [MONITOR] Posicion {symbol} cerrada por {reason}")
                         await close_position(symbol, reason=reason)
                     except Exception as e:
-                        log.error(f"[MONITOR] Error cerrando {symbol}: {e}")
+                        log.error(f"❌ Error cerrando por {reason}: {e}")
 
-            # Liberar posiciones que ya no existen en Binance
+            # Liberar posiciones en memoria
             symbols_to_close = [s for s in active_positions if s not in real_open_symbols]
             for sym in symbols_to_close:
                 await close_position(sym, reason="Cerrado externamente")
 
         except Exception as e:
-            log.error(f"Error en monitor de seguridad: {e}")
+            log.error(f"Error en monitor: {e}")
         finally:
             if monitor_client:
                 try:
                     await monitor_client.close_connection()
-                except Exception:
+                except:
                     pass
+        
+        await asyncio.sleep(5) # Revisar cada 5 segundos
 
 
 
