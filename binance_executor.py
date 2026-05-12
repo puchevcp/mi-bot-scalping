@@ -95,6 +95,7 @@ log = logging.getLogger("BinanceExecutor")
 # ============================================================
 # Estructura: { "BTCUSDT": { "side": "BUY", "entries": [...], "sl_order_id": ..., "tp_order_id": ..., "tranche": 1 } }
 active_positions = {}
+_client = None  # Singleton del cliente Binance (se inicializa una sola vez)
 
 
 async def _get_client():
