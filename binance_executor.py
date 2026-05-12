@@ -98,18 +98,26 @@ active_positions = {}
 
 
 async def _get_client():
-    """Crea el cliente de Binance con la configuración correcta."""
-    if not BINANCE_OK:
-        log.error("python-binance no instalado. Instala con: pip install python-binance")
-        return None
-    if DRY_RUN:
-        log.info("[DRY_RUN] Cliente Binance simulado (sin conexión real)")
-        return None
-
-    client = await AsyncClient.create(API_KEY, API_SECRET, testnet=USE_TESTNET)
-    mode_str = "TESTNET" if USE_TESTNET else "PRODUCCION REAL"
-    log.info(f"Conectado a Async Binance Futures ({mode_str})")
-    return client
+    global _client
+    if _client is None:
+        try:
+            _client = await AsyncClient.create(API_KEY, API_SECRET, testnet=USE_TESTNET)
+            # Asegurar modo ISOLATED y Apalancamiento al iniciar
+            try:
+                await _client.futures_change_margin_type(symbol="BTCUSDT", marginType="ISOLATED")
+                log.info("Modo de margen cambiado a ISOLATED.")
+            except Exception as e:
+                log.info(f"Modo ISOLATED ya configurado o no se pudo cambiar: {e}")
+            
+            try:
+                await _client.futures_change_leverage(symbol="BTCUSDT", leverage=20)
+                log.info("Apalancamiento configurado en 20x.")
+            except Exception as e:
+                log.error(f"Error configurando apalancamiento: {e}")
+                
+        except Exception as e:
+            log.error(f"Error inicializando cliente Binance: {e}")
+    return _client
 
 
 def _is_trading_hours():
@@ -461,37 +469,64 @@ async def close_position(symbol: str, reason: str = "manual"):
 
 async def check_real_exits():
     """
-    Compara las posiciones activas en memoria vs las posiciones reales en Binance.
-    Si una posicion desaparece de Binance, se marca como cerrada.
+    Monitor de Seguridad:
+    1. Detecta si una posicion se cerro en Binance para liberarla en memoria.
+    2. DETECTA POSICIONES SIN SL Y LAS PROTEGE AUTOMATICAMENTE.
     """
     client = await _get_client()
     if not client: return
     
     while True:
         try:
-            # Obtener todas las posiciones abiertas en Binance Futuros
             acc_info = await client.futures_account()
             positions = acc_info.get('positions', [])
             
-            # Crear un set de simbolos con posición abierta REAL (qty != 0)
             real_open_symbols = set()
             for p in positions:
-                if float(p.get('positionAmt', 0)) != 0:
-                    real_open_symbols.add(p['symbol'])
+                amt = float(p.get('positionAmt', 0))
+                if amt != 0:
+                    symbol = p['symbol']
+                    real_open_symbols.add(symbol)
+                    
+                    # --- SEGURIDAD EXTRA: VERIFICAR SL ---
+                    orders = await client.futures_get_open_orders(symbol=symbol)
+                    has_sl = any(o['type'] in ['STOP_MARKET', 'STOP'] for o in orders)
+                    
+                    if not has_sl:
+                        log.warning(f"⚠️ [SEGURIDAD] ¡Posicion en {symbol} SIN STOP LOSS! Intentando colocar uno de emergencia...")
+                        side = "SELL" if amt > 0 else "BUY"
+                        entry_price = float(p['entryPrice'])
+                        # Usamos el SL por defecto del bot (0.25%)
+                        sl_pct = 0.0025
+                        tick_size = 0.1 # Default para BTC si no podemos obtenerlo
+                        
+                        sl_price = _round_price(entry_price * (1 - sl_pct) if amt > 0 else entry_price * (1 + sl_pct), tick_size)
+                        
+                        try:
+                            await client.futures_create_order(
+                                symbol=symbol,
+                                side=side,
+                                type="STOP_MARKET",
+                                stopPrice=sl_price,
+                                closePosition=True
+                            )
+                            log.info(f"✅ [SEGURIDAD] Stop Loss de emergencia colocado en {sl_price}")
+                        except Exception as e:
+                            log.error(f"❌ [SEGURIDAD] No se pudo colocar SL de emergencia: {e}")
             
-            # Revisar nuestras posiciones en memoria
+            # Limpiar memoria si la posicion ya no existe en Binance
             symbols_to_close = []
             for symbol in active_positions.keys():
                 if symbol not in real_open_symbols:
                     symbols_to_close.append(symbol)
             
             for sym in symbols_to_close:
-                close_position(sym, reason="TP/SL Hit en Binance")
+                await close_position(sym, reason="TP/SL Hit o Cierre Externo")
                 
         except Exception as e:
-            log.error(f"Error en monitor de cierres: {e}")
+            log.error(f"Error en monitor de seguridad: {e}")
             
-        await asyncio.sleep(60) # Revisar cada minuto
+        await asyncio.sleep(60)
 
 
 def status():
