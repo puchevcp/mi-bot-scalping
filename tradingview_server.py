@@ -411,22 +411,25 @@ async def receive_webhook(request: Request):
         asyncio.create_task(send_telegram_message(msg_telegram))
         
         # --- INTEGRACIÓN BINANCE: EJECUCIÓN AUTOMÁTICA ---
-        # A pedido del usuario: Ejecutar solo señales MEDIA o ALTA (Score >= 5)
-        # Las de BAJA (Score < 5) se loguean en el diario pero NO se operan en Binance.
+        # A pedido del usuario: Mantener el filtro en señales MEDIA o ALTA (Score >= 5)
         if total_score >= 5 or is_platinum:
-            # CORRECCIÓN: El executor espera "BUY"/"SELL", no "COMPRA"/"VENTA"
             binance_side = "BUY" if is_buy_signal else "SELL"
+            
+            # --- AMPLIACIÓN DE SL (Pedido Usuario: +15%) ---
+            final_sl_pct = (sl_pct / 100) * 1.15
+            
             binance_data = {
                 "symbol": SYMBOL.upper(),
                 "side": binance_side,
                 "verdict": ver_name,
-                "tp_pct": tp3_pct / 100, # Usamos el Moon Target para la automatización
-                "sl_pct": sl_pct / 100,
+                "tp_pct": tp3_pct / 100, 
+                "sl_pct": final_sl_pct,
                 "score": total_score
             }
             # Lanzamos la ejecución en segundo plano
             asyncio.create_task(process_signal(binance_data))
-            print(f"[*] Señal enviada a Binance Executor: {SYMBOL} {binance_side}")
+            log_msg = f"[*] Señal enviada (Score {total_score} | +15% SL): {SYMBOL} {binance_side}"
+            print(log_msg)
 
         return {"status": "success", "verdict": verdict}
     except Exception as e:

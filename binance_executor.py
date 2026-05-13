@@ -359,10 +359,18 @@ async def process_signal(signal_data: dict) -> dict:
             pos["tranche"] = 2
             log.info(f"Precio promedio actualizado: {avg_entry:.4f}")
 
-            # Cancelar SL/TP anterior y reposicionar
-            await _cancel_open_sl_tp(client, symbol, pos)
+            # --- CORRECCIÓN DCA: RESILIENCIA ---
+            try:
+                await _cancel_open_sl_tp(client, symbol, pos)
+            except Exception as e:
+                log.warning(f"No se pudieron cancelar SL/TP viejos, pero seguimos con DCA: {e}")
+
+            # Orders ahora calcula con el nuevo promedio
             orders = await _place_sl_tp(client, symbol, side, qty * 2, avg_entry, sl_pct, tp_pct, info["tick_size"])
             pos.update(orders)
+            # Aseguramos que el monitor use estos nuevos niveles
+            pos["sl_pct_active"] = sl_pct
+            pos["tp_pct_active"] = tp_pct
             active_positions[symbol] = pos
             
             # Notificar DCA en Telegram
@@ -503,13 +511,17 @@ async def check_real_exits():
                 is_long = amt > 0
                 close_side = "SELL" if is_long else "BUY"
 
-                # Calcular niveles de SL y TP
+                # Usar los niveles dinámicos de la posición o los default si no existen
+                pos_data = active_positions.get(symbol, {})
+                active_sl_pct = pos_data.get("sl_pct_active", SL_PCT)
+                active_tp_pct = pos_data.get("tp_pct_active", TP_PCT)
+
                 if is_long:
-                    sl_level = entry_price * (1 - SL_PCT)
-                    tp_level = entry_price * (1 + TP_PCT)
+                    sl_level = entry_price * (1 - active_sl_pct)
+                    tp_level = entry_price * (1 + active_tp_pct)
                 else:
-                    sl_level = entry_price * (1 + SL_PCT)
-                    tp_level = entry_price * (1 - TP_PCT)
+                    sl_level = entry_price * (1 + active_sl_pct)
+                    tp_level = entry_price * (1 - active_tp_pct)
 
                 # Obtener precio actual
                 ticker = await monitor_client.futures_symbol_ticker(symbol=symbol)
