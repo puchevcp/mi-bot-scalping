@@ -272,6 +272,27 @@ async def receive_webhook(request: Request):
         tp2 = alert.price * (1 + tp2_pct/100) if is_buy_signal else alert.price * (1 - tp2_pct/100)
         tp3 = alert.price * (1 + tp3_pct/100) if is_buy_signal else alert.price * (1 - tp3_pct/100)
 
+        # --- FRONT-RUNNING DE MUROS INSTITUCIONALES ---
+        front_run_msg = ""
+        if ctx.heatmap_walls:
+            for w_price, w_qty, w_type in ctx.heatmap_walls:
+                if w_qty >= 300: # Solo muros masivos
+                    if is_buy_signal and alert.price < w_price:
+                        if tp2 >= w_price * 0.999: # Si TP2 esta muy cerca o cruzando el muro
+                            old_tp2 = tp2
+                            tp2 = w_price * 0.9995 # 0.05% ANTES del muro
+                            tp2_pct = ((tp2 - alert.price) / alert.price) * 100
+                            front_run_msg = f"🏃 <b>Front-Run Activado:</b> Esquivando muro en ${w_price:,.0f}\n\n"
+                            break
+                    elif is_sell_signal and alert.price > w_price:
+                        if tp2 <= w_price * 1.001:
+                            old_tp2 = tp2
+                            tp2 = w_price * 1.0005 # 0.05% ANTES del muro
+                            tp2_pct = ((alert.price - tp2) / alert.price) * 100
+                            front_run_msg = f"🏃 <b>Front-Run Activado:</b> Esquivando muro en ${w_price:,.0f}\n\n"
+                            break
+
+
         # --- SISTEMA DE PUNTUACIÓN (SCORING) ---
         ms1h_pts = 1 if macro_aligned else 0
         ms15_pts = 1 if align_15m else 0
@@ -367,6 +388,7 @@ async def receive_webhook(request: Request):
             f"┣ [{fut_check}] CVD Futuros (2pts): ${cvd_fut:,.0f} ({fut_txt})\n"
             f"┣ [{oi_check}] Delta OI (5m/1pt): {oi_delta_5m:+.3f}% ({oi_txt})\n"
             f"┗ Muro Heatmap: {m_vol:,.0f} BTC en ${m_price:,.0f}\n\n"
+            f"{front_run_msg}"
             f"<i>Nota: {vwap_msg}. Revisar <a href='https://aggr.trade/'>Aggr.trade</a>.</i>"
         )
         

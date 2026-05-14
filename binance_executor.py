@@ -232,14 +232,13 @@ async def _place_sl_tp(client, symbol, side, quantity, entry_price, sl_pct, tp_p
     except Exception as e:
         log.error(f"Error colocando Stop Loss: {e}")
 
-    # Intentar colocar TP
+    # Intentar colocar TP (Limit Maker para reducir comisiones)
     tp_id = "error_tp"
     try:
         tp_order = await client.futures_create_order(
             symbol=symbol,
             side=close_side,
-            type="TAKE_PROFIT",
-            stopPrice=tp_price,
+            type="LIMIT",
             price=tp_price,
             quantity=quantity,
             reduceOnly=True,
