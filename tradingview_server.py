@@ -422,13 +422,13 @@ async def receive_webhook(request: Request):
                 "symbol": SYMBOL.upper(),
                 "side": binance_side,
                 "verdict": ver_name,
-                "tp_pct": tp3_pct / 100, 
+                "tp_pct": tp2_pct / 100,  # <-- CAMBIO A TP2 (PLATINUM)
                 "sl_pct": final_sl_pct,
                 "score": total_score
             }
             # Lanzamos la ejecución en segundo plano
             asyncio.create_task(process_signal(binance_data))
-            log_msg = f"[*] Señal enviada (Score {total_score} | +15% SL): {SYMBOL} {binance_side}"
+            log_msg = f"[*] Señal enviada (Score {total_score} | TP2 | +15% SL): {SYMBOL} {binance_side}"
             print(log_msg)
 
         return {"status": "success", "verdict": verdict}
