@@ -432,6 +432,8 @@ async def process_signal(signal_data: dict) -> dict:
         "side":    side,
         "entries": [exec_price],
         "tranche": 1,
+        "sl_pct_active": sl_pct,
+        "tp_pct_active": tp_pct,
         **orders
     }
 
