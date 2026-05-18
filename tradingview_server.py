@@ -462,6 +462,29 @@ async def receive_webhook(request: Request):
 async def health_check():
     return {"status": "online", "service": "Platinum Sniper Engine"}
 
+@app.get("/test-binance")
+async def test_binance_connection():
+    """Endpoint para probar la conexión con Binance Testnet directamente."""
+    from binance_executor import _get_client, _get_balance, BINANCE_OK, USE_TESTNET
+    
+    if not BINANCE_OK:
+        return {"status": "error", "message": "Librería python-binance no instalada."}
+        
+    try:
+        client = await _get_client()
+        balance = await _get_balance(client)
+        return {
+            "status": "success",
+            "message": "Conexion a Binance exitosa",
+            "testnet_mode": USE_TESTNET,
+            "usdt_balance": balance
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Fallo al conectar con Binance: {str(e)}"
+        }
+
 if __name__ == "__main__":
     import platform
     if platform.system() == 'Windows':

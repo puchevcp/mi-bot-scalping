@@ -390,9 +390,15 @@ async def process_signal(signal_data: dict) -> dict:
     info = await _get_symbol_info(client, symbol)
     if info is None:
         if not DRY_RUN: await client.close_connection()
+        await send_telegram_message(f"❌ <b>ERROR BINANCE</b>\nNo se pudo obtener información del símbolo {symbol}.")
         return {"status": "error", "reason": "no_symbol_info"}
 
     balance = await _get_balance(client)
+    if balance <= 0:
+        await send_telegram_message(f"❌ <b>ERROR BINANCE</b>\nSaldo insuficiente (0 USDT). Revisa la cuenta.")
+        if not DRY_RUN: await client.close_connection()
+        return {"status": "error", "reason": "insufficient_balance"}
+        
     current_price = info["current_price"] or 0
     qty = _calc_quantity(balance, RISK_PER_TRANCHE, current_price or 1, info["step_size"], sl_pct)
 
@@ -415,12 +421,14 @@ async def process_signal(signal_data: dict) -> dict:
             if exec_price <= 0:
                 # Si aun asi es 0, no podemos calcular SL/TP con seguridad
                 log.error("No se pudo obtener un precio de ejecucion valido para SL/TP.")
+                await send_telegram_message(f"❌ <b>ERROR BINANCE</b>\nPrecio de ejecución inválido para {symbol}.")
                 if not DRY_RUN: await client.close_connection()
                 return {"status": "error", "reason": "invalid_execution_price"}
 
             log.info(f"Tramo 1 MARKET ejecutado: {order['orderId']} @ {exec_price}")
         except BinanceAPIException as e:
             log.error(f"Error colocando MARKET: {e}")
+            await send_telegram_message(f"❌ <b>ERROR BINANCE</b>\nFallo al ejecutar orden MARKET.\nMotivo: {e.message if hasattr(e, 'message') else str(e)}")
             if not DRY_RUN: await client.close_connection()
             return {"status": "error", "reason": str(e)}
 
