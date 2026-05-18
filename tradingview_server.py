@@ -208,10 +208,10 @@ async def get_multiframe_context(symbol: str, is_buy_signal: bool):
             
             return align_15m, msg_15m, macro_aligned, msg_1h, vwap, stdev, mfi_now, mfi_prev, r15, wt1_val, atr_15m
     except asyncio.TimeoutError:
-        return False, "Timeout", False, "Timeout", False, "Timeout", None, None, None, None, 1.0, 0, 0
+        return False, "Timeout", False, "Timeout", False, "Timeout", None, None, None, None, 1.0
     except Exception as e:
         print(f"[!] Error multiframe: {e}")
-        return False, "Error API", False, "Error API", False, "Error API", None, None, None, None, 1.0, 0, 0
+        return False, "Error API", False, "Error API", False, "Error API", None, None, None, None, 1.0
             
 @app.post("/webhook")
 async def receive_webhook(request: Request):
