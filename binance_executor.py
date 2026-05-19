@@ -501,76 +501,77 @@ async def check_real_exits():
     SL_PCT = 0.0025  # 0.25% Stop Loss
     TP_PCT = 0.0075  # 0.75% Take Profit
 
-    while True:
-        monitor_client = None
-        try:
-            monitor_client = await AsyncClient.create(API_KEY, API_SECRET, testnet=USE_TESTNET)
-            acc_info = await monitor_client.futures_account()
-            positions = acc_info.get('positions', [])
+    monitor_client = None
+    try:
+        monitor_client = await AsyncClient.create(API_KEY, API_SECRET, testnet=USE_TESTNET)
+        while True:
+            try:
+                acc_info = await monitor_client.futures_account()
+                positions = acc_info.get('positions', [])
 
-            real_open_symbols = set()
-            for p in positions:
-                amt = float(p.get('positionAmt', 0))
-                if amt == 0:
-                    continue
+                real_open_symbols = set()
+                for p in positions:
+                    amt = float(p.get('positionAmt', 0))
+                    if amt == 0:
+                        continue
 
-                symbol = p['symbol']
-                real_open_symbols.add(symbol)
-                entry_price = float(p['entryPrice'])
-                is_long = amt > 0
-                close_side = "SELL" if is_long else "BUY"
+                    symbol = p['symbol']
+                    real_open_symbols.add(symbol)
+                    entry_price = float(p['entryPrice'])
+                    is_long = amt > 0
+                    close_side = "SELL" if is_long else "BUY"
 
-                # Usar los niveles dinámicos de la posición o los default si no existen
-                pos_data = active_positions.get(symbol, {})
-                active_sl_pct = pos_data.get("sl_pct_active", SL_PCT)
-                active_tp_pct = pos_data.get("tp_pct_active", TP_PCT)
+                    # Usar los niveles dinámicos de la posición o los default si no existen
+                    pos_data = active_positions.get(symbol, {})
+                    active_sl_pct = pos_data.get("sl_pct_active", SL_PCT)
+                    active_tp_pct = pos_data.get("tp_pct_active", TP_PCT)
 
-                if is_long:
-                    sl_level = entry_price * (1 - active_sl_pct)
-                    tp_level = entry_price * (1 + active_tp_pct)
-                else:
-                    sl_level = entry_price * (1 + active_sl_pct)
-                    tp_level = entry_price * (1 - active_tp_pct)
+                    if is_long:
+                        sl_level = entry_price * (1 - active_sl_pct)
+                        tp_level = entry_price * (1 + active_tp_pct)
+                    else:
+                        sl_level = entry_price * (1 + active_sl_pct)
+                        tp_level = entry_price * (1 - active_tp_pct)
 
-                # Obtener precio actual
-                ticker = await monitor_client.futures_symbol_ticker(symbol=symbol)
-                current_price = float(ticker['price'])
+                    # Obtener precio actual
+                    ticker = await monitor_client.futures_symbol_ticker(symbol=symbol)
+                    current_price = float(ticker['price'])
 
-                # --- Verificar SL ---
-                sl_hit = (is_long and current_price <= sl_level) or \
-                         (not is_long and current_price >= sl_level)
+                    # --- Verificar SL ---
+                    sl_hit = (is_long and current_price <= sl_level) or \
+                             (not is_long and current_price >= sl_level)
 
-                # --- Verificar TP ---
-                tp_hit = (is_long and current_price >= tp_level) or \
-                         (not is_long and current_price <= tp_level)
+                    # --- Verificar TP ---
+                    tp_hit = (is_long and current_price >= tp_level) or \
+                             (not is_long and current_price <= tp_level)
 
-                if sl_hit or tp_hit:
-                    reason = "SL" if sl_hit else "TP"
-                    log.warning(f"⚠️ [MONITOR] {symbol} | {reason} ALCANZADO @ {current_price:.2f}. Cerrando...")
-                    try:
-                        await monitor_client.futures_create_order(
-                            symbol=symbol, side=close_side, type="MARKET", quantity=abs(amt)
-                        )
-                        log.info(f"✅ [MONITOR] Posicion {symbol} cerrada por {reason}")
-                        await close_position(symbol, reason=reason)
-                    except Exception as e:
-                        log.error(f"❌ Error cerrando por {reason}: {e}")
+                    if sl_hit or tp_hit:
+                        reason = "SL" if sl_hit else "TP"
+                        log.warning(f"⚠️ [MONITOR] {symbol} | {reason} ALCANZADO @ {current_price:.2f}. Cerrando...")
+                        try:
+                            await monitor_client.futures_create_order(
+                                symbol=symbol, side=close_side, type="MARKET", quantity=abs(amt)
+                            )
+                            log.info(f"✅ [MONITOR] Posicion {symbol} cerrada por {reason}")
+                            await close_position(symbol, reason=reason)
+                        except Exception as e:
+                            log.error(f"❌ Error cerrando por {reason}: {e}")
 
-            # Liberar posiciones en memoria
-            symbols_to_close = [s for s in active_positions if s not in real_open_symbols]
-            for sym in symbols_to_close:
-                await close_position(sym, reason="Cerrado externamente")
+                # Liberar posiciones en memoria
+                symbols_to_close = [s for s in active_positions if s not in real_open_symbols]
+                for sym in symbols_to_close:
+                    await close_position(sym, reason="Cerrado externamente")
 
-        except Exception as e:
-            log.error(f"Error en monitor: {e}")
-        finally:
-            if monitor_client:
-                try:
-                    await monitor_client.close_connection()
-                except:
-                    pass
-        
-        await asyncio.sleep(5) # Revisar cada 5 segundos
+            except Exception as e:
+                log.error(f"Error en monitor: {e}")
+            
+            await asyncio.sleep(5) # Revisar cada 5 segundos
+    finally:
+        if monitor_client:
+            try:
+                await monitor_client.close_connection()
+            except:
+                pass
 
 
 
