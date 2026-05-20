@@ -565,7 +565,13 @@ async def check_real_exits():
             except Exception as e:
                 log.error(f"Error en monitor: {e}")
             
-            await asyncio.sleep(5) # Revisar cada 5 segundos
+            # Polling adaptativo para evitar bans en Testnet
+            # Si no hay posiciones registradas localmente, dormimos mucho más (60s)
+            # Si hay una posición activa, monitoreamos agresivamente (5s)
+            if not active_positions:
+                await asyncio.sleep(60)
+            else:
+                await asyncio.sleep(5)
     finally:
         if monitor_client:
             try:
